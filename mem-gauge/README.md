@@ -13,14 +13,31 @@ A memory gauge under the Claude Code composer, and a **Memory** pane that shows 
   - totals: Used, Free, Compressed, Swap, Load, each figure flush with the pane's right edge (free disk is in the Disk pane)
   - **Sessions:** the ten biggest active Claude sessions (memory first). A session that runs mem-gauge shows model, memory, context %, running agents and minutes idle; one that does not is listed from the engine's own session record (`~/.claude/sessions/<pid>.json`) by its name with its process tree's memory and idle time (model, context and agents read `--`, and there is no Ask to wrap for it); **View all** (hotkey a) lists every active session, up to 60, and **View top 10** folds it back. This session is the bold row. A session whose heartbeat is older than 2 minutes reads `(stale)`; one whose process has exited is not listed. A Claude engine with no session record is summed on one line.
   - **Other apps:** the 10 largest non-Claude apps, helper processes rolled up under their app (Chrome's renderers count as Chrome).
-  - **Optimize:** fixed rules, no AI call, each with an **Apply** button where there is one safe thing to do (confirmed first in the engine's own dialog; a tip with nothing safe to automate has no button):
+  - **Optimize:** fixed rules (the rules themselves make no AI call), each with an **Apply** button where there is one safe thing to do (confirmed first in the engine's own dialog; a tip with nothing safe to automate has no button):
     - another session idle over 30 min and over 1 GB: wrap or archive it; Apply asks it to wrap (the request file below) when it runs the mod, no button when it does not
-    - context over 80 %: `/compact` or hand off to a fresh session; Apply runs `/compact` on this session only
+    - this session's context over 80 %: two buttons. **Compact** runs `/compact` on this session (confirmed first). **Hand off** writes a handoff note and moves you to a fresh session (see below). Another session's context over 80 % is advice only: compact or hand off from there.
     - more than 3 running agents: the largest fan-out; consider running them one after another (no button)
     - memory over 85 % used or under pressure: close the largest other app; Apply asks it to quit the normal way (`osascript`, the name passed as an argument, so it may still ask you to save; never the Claude app itself)
     - load over twice the core count: pause heavy test suites (no button)
     - under 10 GB of free disk: Apply opens the Disk pane, which says what is safe to free
   - **Refresh** (`r`) and **Close** (`c`, or Esc).
+
+### Compact or hand off?
+
+They are not the same thing.
+
+- **Compact** keeps the same session and summarizes the conversation so far in place: the model writes a summary, the old messages are replaced by it, and you keep going. Best mid-task, when there is no natural break and the recent context matters. It loses detail: exact tool outputs and file contents are gone, only what the summary keeps.
+- **Hand off** starts fresh on purpose: a handoff note is written (goal, what is done, decisions, exact next steps, open questions, gotchas), the conversation is cleared, and the fresh conversation starts from the note. Best at a milestone (a PR merged, a phase done), when most of the context is history or failed attempts, or after many hours in one session. Every turn afterwards is cheaper and cleaner. It is only as good as the note, which is what the button automates.
+
+What **Hand off** does, in order, and why nothing is lost if a step fails:
+
+1. Asks you to confirm (Hand off or Cancel). Cancel or closing the dialog does nothing.
+2. Makes one model call: it asks this session's own model, over this session's own conversation (`$.model.fork`, served from the session's prompt cache, every tool denied, so it can only write text), for a note of at most 700 words with fixed sections, no credentials and no quotes from the transcript.
+3. Cleans the note (escape codes, control characters and invisible characters removed; cut at 20,000 characters), blanks anything shaped like a secret (API keys, AWS key ids, GitHub and Slack tokens, private key blocks, `Bearer …`, `token: …`, `password=…` become `[redacted]`), and writes it to `~/.claude/handoffs/<date-time>-<repo>-<session id start>.md` under a header naming the old session and how to resume it (`claude --resume <id>`). If the model gave no note or the file cannot be written, it says so and **nothing is cleared**.
+4. Runs `/clear`. The old conversation is not deleted; it stays resumable by its id.
+5. Puts `Continue from the handoff note at <path>: read it first, then carry on with its next step.` in the prompt box. It is **never sent for you**: read the note, edit if you like, then press Enter. If the box cannot take it, the toast tells you to paste the path.
+
+While it runs, the button reads `Writing note…` and the Compact button beside it is dim and does nothing. Notes are one file per hand-off, never inside the repository; delete them when you no longer need them.
 
 ### Ask to wrap
 
@@ -40,7 +57,7 @@ or set `CLAUDE_CODE_PLUGIN_DIRS` to that absolute path (in the shell, or in the 
 
 ## The gauge icon
 
-On the desktop the gauge sits in the prompt footer's mode row (the dim labels at the right of the composer, the one site under the composer the desktop app raises to plugins). That strip clips whatever does not fit, draws no vector element, draws every button before every text whatever the order, and a button (a small native chip) is the only pressable thing it has. It also ignores a Box's hover and display. So the row is two buttons, each a glyph icon with its figure: the memory ring glyph (`○ ◔ ◑ ◕ ●`, filling with use) with the used percent, for example `◔ 60%`, which opens the **Memory** pane, and the disk glyph (`⛁`) with the free space, `⛁ 901 GB`, which opens the **Disk** pane; then the engine's own mode labels. With `footerCompact` on, both figures sit in one chip (`◔ 60% · ⛁ 927 GB`) that opens the Memory pane, whose **Disk** button (`d`) opens the Disk pane; use it when other mods' chips share the strip. With the `footerButtons` option off the row is plain text (the ring glyph in red) and `/mem` and `/disk` open the panes. Under memory pressure, or while another session's wrap request is showing, the memory figure reads `◔ ! 60%`. The terminal, which has no vector element, draws the quintile glyph in red and the one-line text `Memory 60% · Pressure ✓ · 7 sessions · Disk 41 GB free` in the hint line under the prompt; a press there opens the Memory pane. The separate status line is off by default (option `statusLine`); turn it on for VS Code or mobile where neither row is drawn. The Memory pane header draws the red ring with the percent inside at 88 px.
+On the desktop the gauge sits in the prompt footer's mode row (the dim labels at the right of the composer, the one site under the composer the desktop app raises to plugins). That strip clips whatever does not fit, draws no vector element, draws every button before every text whatever the order, and a button (a small native chip) is the only pressable thing it has. It also ignores a Box's hover and display. So the row is two buttons, each a glyph icon with its figure: the memory ring glyph (`○ ◔ ◑ ◕ ●`, filling with use) with the used percent, for example `◔ 60%`, which opens the **Memory** pane, and the disk glyph (`⛁`) with the free space, `⛁ 901 GB`, which opens the **Disk** pane; then the engine's own mode labels. With `footerCompact` on, both figures sit in one tight chip as fullness percents (`◔60% ⛁59%`) that opens the Memory pane, whose **Disk** button (`d`) opens the Disk pane; use it when other mods' chips share the strip. With the `footerButtons` option off the row is plain text (the ring glyph in red) and `/mem` and `/disk` open the panes. Under memory pressure, or while another session's wrap request is showing, the memory figure reads `◔ ! 60%`. The terminal, which has no vector element, draws the quintile glyph in red and the one-line text `Memory 60% · Pressure ✓ · 7 sessions · Disk 41 GB free` in the hint line under the prompt; a press there opens the Memory pane. The separate status line is off by default (option `statusLine`); turn it on for VS Code or mobile where neither row is drawn. The Memory pane header draws the red ring with the percent inside at 88 px.
 
 ## The Disk pane
 
@@ -56,7 +73,7 @@ Set in the config menu, or in settings under `pluginConfigs` → `mem-gauge`:
 | `idleMinutes` | 30 | Minutes without a turn before a session counts as idle for the wrap advice. |
 | `statusLine` | false | Also show the one-line summary as a status line (the gauge row already carries it). |
 | `footerButtons` | true | Draw the desktop footer figures as buttons (grey chips) that open the panes; off, they are plain text and `/mem`, `/disk` open the panes. |
-| `footerCompact` | false | One chip for both figures (`◔ 60% · ⛁ 927 GB`) that opens the Memory pane, where **Disk** (`d`) opens the Disk pane. For footers that other mods' chips share: the desktop strip clips once the chips overflow it. |
+| `footerCompact` | false | One tight chip for both figures as fullness percents (`◔60% ⛁59%`) that opens the Memory pane, where **Disk** (`d`) opens the Disk pane. For footers that other mods' chips share: the desktop strip clips once the chips overflow it. |
 
 ## How it works
 
@@ -74,11 +91,15 @@ Set in the config menu, or in settings under `pluginConfigs` → `mem-gauge`:
 
 Each tick runs, with argv only (no shell) and a 5 s timeout each, all in parallel: one `sysctl` (pressure level, swap, load; memory size and cores are read on the first call only, they never change), `vm_stat`, `df -k /` and `ps -axo pid=,ppid=,rss=,comm=`. A collector that fails leaves only its own figures blank (`--` or `?`); the rest still draws. Ticks never overlap: a slow one is joined, not doubled. Sessions share the work: whoever finds `~/.claude/mem-gauge/machine.json` older than about 25 seconds collects and writes it, the rest read it. "Used" is (active + wired + compressed) pages, the same as Activity Monitor's "Memory Used". Pressure comes from `kern.memorystatus_level` (percent free; under 20 warns, under 10 is critical).
 
+The one model call the mod makes is the **Hand off** note: `$.model.fork`, one tool-less call over this session's own conversation, served from its prompt cache, only after you confirm. Then, and only once the note is in `~/.claude/handoffs/`, it runs `/clear` (`$.command.run`) and fills the prompt box (`$.prompt.fill`), never sending it. No process runs for a hand-off.
+
 Files it writes, all under `~/.claude/mem-gauge/`:
 
 - `machine.json`: the shared reading (numbers and process names, no command lines)
 - `sessions/<sessionId>.json`: one heartbeat per session: label (repo · branch), working folder, model, memory, context %, rate-limit %, running agents, last activity. Never prompt text, never secrets.
 - `requests/<sessionId>.json`: an Ask to wrap waiting to be seen; removed once seen.
+
+And one more folder, only when you press **Hand off**: `~/.claude/handoffs/<yyyy-mm-dd-HHmmss>-<repo>-<first 8 of the session id>.md` (time in UTC), the handoff note, cleaned and with secret shapes redacted. One file per hand-off, never in the repository, never removed by the mod: delete them yourself.
 
 Clean-up never depends on `session.end` (a crash or a kill skips it):
 
@@ -98,6 +119,7 @@ The prompt text of a turn is never read or stored; `turn.start` is used only as 
 - the pane on terminal (text bar, no Svg) and desktop (Svg ring with alt text), plus narrow panes on all four surfaces, and the pressable gauge on the hint line (mounted and pressed on terminal and desktop);
 - `/mem` from each kind of origin, placed, unplaced and headless;
 - Ask to wrap: confirm, cancel, dismiss, the 10-minute limit, and the receiving side's toast, marker and de-duplication;
+- Compact and Hand off: this session's tip draws both buttons and another session's none; the hand-off order (confirm, note, write, `/clear`, fill, never submitted); Cancel and a dismissed dialog; nothing to fork, an API error, an empty note, a refused write and a refused `/clear` (nothing cleared before the note is on disk); a composer that will not take the fill; escape codes, bidi characters and keys cleaned and redacted on disk; the 20,000-character cut; `Writing note…` while in flight with a second press and Compact ignored; each secret shape and a false-positive guard;
 - fail-safe paths: every process and file refused, an untrusted parent pid, a transient pid-probe failure (retried, at most five tries), the `statusLine` option off, usage unreadable (figures come from `session.measure`), the timer re-armed by the first main-loop turn after a hot reload, a denied Close press, `session.end` not waiting on its `rm`, `/mem` during a tick in flight;
 - hostile text: a heartbeat label or model, or an app name, holding newlines, escape codes or bidi characters cannot forge lines in `/mem`, the Ask to wrap question or a toast.
 

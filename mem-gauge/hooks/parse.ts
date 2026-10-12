@@ -580,11 +580,16 @@ export function formatCompact(bytes: number | null): string {
  * not fit: the used percent, the free disk space, and whether something needs
  * attention (pressure, or a wrap request). Pressure itself is read in the pane.
  */
-export function footerParts(snapshot: Snapshot, wrap: WrapRequest | null): { used: string; disk: string; alarm: boolean } {
+export function footerParts(snapshot: Snapshot, wrap: WrapRequest | null): { used: string; disk: string; diskPct: string; alarm: boolean } {
   const m = snapshot.machine
+  const full = m.diskTotalBytes !== null && m.diskFreeBytes !== null && m.diskTotalBytes > 0
+    ? `${Math.round((100 * (m.diskTotalBytes - m.diskFreeBytes)) / m.diskTotalBytes)}%`
+    : '--'
   return {
     used: m.usedPercent === null ? '--' : `${Math.round(m.usedPercent)}%`,
     disk: formatCompact(m.diskFreeBytes),
+    // The disk's fullness, for the one-chip footer: the same reading as the memory percent.
+    diskPct: full,
     alarm: isAlarm(m.pressure) || wrap !== null,
   }
 }

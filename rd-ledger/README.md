@@ -6,7 +6,7 @@ A contemporaneous ledger of **R&D engagement time and AI usage**, kept inside ev
 
 ## What you see
 
-- **Footer chip** (desktop prompt footer; the terminal's hint line): `⧗ 2.4h`, an hourglass mark and the R&D hours recorded today (the same figure the Overview's "today" line shows; `⧗ --` until the first ledger read). It carries no cost: the usage-gauge chip owns the session cost. Press it to open the pane on the Overview, the R&D tax ledger; the session ledger stays one press away (**Session**, or `/rd session`). With the `footerButton` option off the figure is plain text.
+- **Footer chip** (desktop prompt footer; the terminal's hint line): `⧗2.4h`, an hourglass mark and the R&D hours recorded today (the same figure the Overview's "today" line shows; `⧗--` until the first ledger read). It carries no cost: the usage-gauge chip owns the session cost. Press it to open the pane on the Overview, the R&D tax ledger; the session ledger stays one press away (**Session**, or `/rd session`). With the `footerButton` option off the figure is plain text.
 - **The R&D ledger pane**: five views sharing one chrome (buttons Session `i`, Sessions `a`, Overview `o`, Review `v`, Spend `s`, Refresh `r`, Export `e`, Close `c`). The view you were on, and the session you picked, are still there after a reload.
   - **Session** (`/rd session`, or `/rd session <first 8 characters of a session id>`): engaged hours, prompts, main and agent turns, the four token counts and the cache-hit ratio, the engine's cost beside the list-price estimate, a by-model table, an agents table (the main loop and each subagent with its turns, model, tokens, estimate and share), and recommendations for spending less where the numbers support one: a longer or shorter cache TTL, a cheaper model for a short-answer subagent, a large context worth compacting, turns that ended in errors, or an hour that cost twice your usual. Every figure in a recommendation is an estimate.
   - **Sessions** (`/rd sessions`): every session this and last month, newest first, with its date, id, repository, engaged hours, turns, subagents, cost and recommendation count, and your median cost per engaged hour. It lists 40 at first; **More** (`m`) adds 40 at a time up to the newest 300, and remembers how many. Pick one with **Open session…** (or `/rd session <id8>`), and **Back** returns to the list. Recommendations about the cache TTL say what they assume and stay quiet when the TTL changed during the session.
@@ -35,7 +35,7 @@ Set in the config menu, or in settings under `pluginConfigs` → `rd-ledger`:
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `footerButton` | true | The footer figure (`⧗ <hours>h`) is a pressable chip that opens the Overview; off, it is plain text. |
+| `footerButton` | true | The footer figure (`⧗<hours>h`) is a pressable chip that opens the Overview; off, it is plain text. |
 | `refreshMinutes` | 5 | How often the week and month figures are recomputed (1 to 60). |
 | `idleGapMinutes` | 30 | Two prompts further apart than this start a new engagement block (5 to 120). The canonical rd-tracker methodology is 30; changing it changes the method hash printed on every export. |
 | `cacheTtl` | `5m` | The prompt-cache write assumption when the engine does not report a TTL: `5m` prices cache writes at 1.25× input, `1h` at 2×. |
@@ -95,7 +95,7 @@ Writes go to a temp file beside the target and are renamed over it, so a crash n
 
 ## What to test
 
-1. Look at the prompt footer: the chip reads `⧗ --` until the first ledger read, then `⧗ ` and today's R&D hours to one decimal (`⧗ 0.0h` on a day with none); it never shows a cut-off `…`, and it shows no cost.
+1. Look at the prompt footer: the chip reads `⧗--` until the first ledger read, then `⧗` and today's R&D hours to one decimal (`⧗0.0h` on a day with none); it never shows a cut-off `…`, and it shows no cost.
 2. Press it: the pane opens on the **Overview** (this week by component, the review queue, spend, deadlines, data health). Press **Session** for this session's hours, tokens, costs, models and agents, and either recommendations or "No recommendations for this session".
 3. Press **Sessions** (or type `/rd sessions`): sessions this and last month are listed newest first; press **More** if there are over 40, pick an older one with **Open session…** (it may read "Reading the ledger…" for a moment), check its figures, press **Back**.
 4. Type `/rd session` and the first eight characters of a session id from the list: that session opens. Eight characters that match nothing, or two sessions, answer one line and open nothing.

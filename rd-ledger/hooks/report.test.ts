@@ -240,20 +240,20 @@ const summary = (over: Partial<SessionSummary> = {}): SessionSummary => ({
 describe('footer label', () => {
   test('the hourglass mark and today\'s R&D hours to one decimal: -- before a rollup, 0.0h for a negative or non-finite figure, never past 10 characters', async () => {
     const cases: [number | null, string][] = [
-      [null, '\u29D7 --'],
-      [0, '\u29D7 0.0h'],
-      [8640, '\u29D7 2.4h'],
-      [45_360, '\u29D7 12.6h'],
-      [179, '\u29D7 0.0h'],
-      [181, '\u29D7 0.1h'],
-      [-3600, '\u29D7 0.0h'],
-      [Number.NaN, '\u29D7 0.0h'],
-      [Number.POSITIVE_INFINITY, '\u29D7 0.0h'],
-      [Number.NEGATIVE_INFINITY, '\u29D7 0.0h'],
-      [86_400, '\u29D7 24.0h'],
-      [35_999_640, '\u29D7 9999.9h'],
-      [36_000_000, '\u29D7 9999h+'],
-      [1e15, '\u29D7 9999h+'],
+      [null, '\u29D7--'],
+      [0, '\u29D70.0h'],
+      [8640, '\u29D72.4h'],
+      [45_360, '\u29D712.6h'],
+      [179, '\u29D70.0h'],
+      [181, '\u29D70.1h'],
+      [-3600, '\u29D70.0h'],
+      [Number.NaN, '\u29D70.0h'],
+      [Number.POSITIVE_INFINITY, '\u29D70.0h'],
+      [Number.NEGATIVE_INFINITY, '\u29D70.0h'],
+      [86_400, '\u29D724.0h'],
+      [35_999_640, '\u29D79999.9h'],
+      [36_000_000, '\u29D79999h+'],
+      [1e15, '\u29D79999h+'],
     ]
     for (const [seconds, label] of cases) {
       expect(footerLabel(seconds)).toBe(label)

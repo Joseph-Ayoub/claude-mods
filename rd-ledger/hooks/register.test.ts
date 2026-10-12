@@ -495,7 +495,7 @@ describe('the pane', () => {
     expect(chip?.type).toBe('Button')
     // The figure is the rollup's today line, the one the Overview shows; the footer no longer carries a cost.
     const label = String(chip?.props['label'])
-    expect(label).toMatch(/^\u29D7 \d+\.\dh$/)
+    expect(label).toMatch(/^\u29D7\d+\.\dh$/)
     // Exactly the rollup's todayS, through the one shared formatter: a chip wired to another field would differ.
     expect(seen.todayS).not.toBeNull()
     expect(label).toBe(footerLabel(seen.todayS))
@@ -527,7 +527,7 @@ describe('the pane', () => {
   test('before any rollup exists the chip still draws, as the hourglass and --', async ($, on) => {
     const w = make(on)
     const mode = await $.ui.mount({ plugin: 'rd-ledger', surface: 'desktop', ...MODE })
-    expect((await mode.find({ key: 'rd-ledger' }))?.props['label']).toBe('\u29D7 --')
+    expect((await mode.find({ key: 'rd-ledger' }))?.props['label']).toBe('\u29D7--')
     await mode.unmount()
     clean(w)
   })
@@ -552,13 +552,13 @@ describe('the pane', () => {
     await start($, w)
     const mode = await $.ui.mount({ plugin: 'rd-ledger', surface: 'desktop', ...MODE })
     expect(await mode.find({ key: 'rd-ledger' })).toBeUndefined()
-    // Exactly what the chip's own read produced: `⧗ --` before a rollup exists, else today's hours.
+    // Exactly what the chip's own read produced: `⧗--` before a rollup exists, else today's hours.
     expect(await mode.find({ type: 'Text', text: footerLabel(seen.todayS) })).toBeDefined()
     await mode.unmount()
     clean(w)
   })
 
-  test('a rollup that lacks todayS altogether draws the chip as ⧗ --', async ($, on) => {
+  test('a rollup that lacks todayS altogether draws the chip as ⧗--', async ($, on) => {
     on('state.get', { plugin: 'rd-ledger', key: 'rollup' }, (_$, e, next) =>
       next(e).then(r => {
         const read = (r as { value?: { value?: unknown; version: number } }).value
@@ -574,7 +574,7 @@ describe('the pane', () => {
     await start($, w)
     await engage($, w)
     const mode = await $.ui.mount({ plugin: 'rd-ledger', surface: 'desktop', ...MODE })
-    expect((await mode.find({ key: 'rd-ledger' }))?.props['label']).toBe('\u29D7 --')
+    expect((await mode.find({ key: 'rd-ledger' }))?.props['label']).toBe('\u29D7--')
     await mode.unmount()
     clean(w)
   })

@@ -9,7 +9,7 @@ Function-hooks plugins built from the typed-history analysis in `reports/claude-
 | `wrap` | "is everything done, merged on green, archive this session" | `/wrap` |
 | `model-pin` | `/model claude-fable-5-1` re-pins | status line + `/model-pin` |
 | `secret-guard` | credentials pasted into chat | prompt hook |
-| `mem-gauge` | "is the Mac starving?", which session eats RAM | status line + `/mem` pane |
+| `mem-gauge` | "is the Mac starving?", which session eats RAM, and the compact-or-hand-off call at 80 % context | status line + `/mem` pane |
 | `merge-lane` | sessions fighting over PR/CI/merge | `/lane` + Bash merge gate |
 | `usage-gauge` | `/usage` dumps into the transcript to see what the session cost | footer chip + `/spend` pane |
 

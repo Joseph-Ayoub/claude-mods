@@ -333,7 +333,7 @@ describe('optimize rules', () => {
     const texts = advise(busy, options).map(a => a.text)
     expect(texts).toEqual([
       'old · feat: idle 45 min, wrap or archive (frees 3.0 GB)',
-      'big · ctx: context 86%, /compact or hand off to a fresh session',
+      'big · ctx: context 86%, compact or hand off from there',
       'fan · out: 6 agents running, the largest fan-out; consider sequencing',
       'memory is tight: close Google Chrome (4.0 GB)',
       'load 40.0 on 18 cores: pause heavy test suites',
@@ -434,13 +434,14 @@ describe('footer', () => {
       unregistered: null,
       topApps: [],
     }
-    expect(footerParts(snapshot, null)).toEqual({ used: '60%', disk: '901 GB', alarm: false })
+    expect(footerParts(snapshot, null)).toEqual({ used: '60%', disk: '901 GB', diskPct: '--', alarm: false })
     const warn = { ...snapshot, machine: { ...snapshot.machine, pressure: 'warn' as const } }
     expect(footerParts(warn, null).alarm).toBe(true)
     expect(footerParts(snapshot, { at: 0, freesMB: 2048 }).alarm).toBe(true)
     expect(footerParts({ ...snapshot, machine: { ...snapshot.machine, usedPercent: null, diskFreeBytes: null } }, null)).toEqual({
       used: '--',
       disk: '--',
+      diskPct: '--',
       alarm: false,
     })
   })
@@ -579,6 +580,15 @@ describe('disk', () => {
     expect(byKey['idle:nomod']).toBeNull()
     expect(byKey['context:me']).toEqual({ kind: 'compact' })
     expect(byKey['context:other']).toBeNull()
+    // This session's context tip offers its two ways out; another session's offers none.
+    const secondary = Object.fromEntries(tips.map(t => [t.key, t.secondary ?? null]))
+    expect(secondary['context:me']).toEqual({ kind: 'hand-off' })
+    expect(secondary['context:other']).toBeNull()
+    expect(tips.filter(t => t.key !== 'context:me').every(t => t.secondary === undefined)).toBe(true)
+    expect(tips.find(t => t.key === 'context:me')?.text).toBe(
+      'x: context 90%. Compact to keep going mid-task, or hand off at a milestone (a note is written for the fresh session).',
+    )
+    expect(tips.find(t => t.key === 'context:other')?.text).toBe('x: context 90%, compact or hand off from there')
     expect(byKey['app']).toEqual({ kind: 'quit-app', app: 'Google Chrome' })
     // The host of this session is never offered a quit.
     const host = { ...snapshot, topApps: [{ name: 'Claude', rssMB: 4096, processes: 20 }] }

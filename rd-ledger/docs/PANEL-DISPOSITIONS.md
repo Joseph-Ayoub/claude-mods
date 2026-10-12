@@ -65,7 +65,7 @@ canonical JSON of six fields; `a5db146c` reproduced), CYB-6 (`mv -h` exists on m
 | PRV-10 | minor | adopted: PROVISIONAL stamps, confirmed and provisional totals apart, `confirmedLagDays` | §6.4 |
 | PRV-11 | minor | adopted: salted hash of the root relative to HOME; bridge argv logged with placeholders | §3.1, §3.5 |
 | PRV-12 | minor | adopted: `personLabel` option, README header only | §9 |
-| PRV-13 | minor | adopted: `2.4h today · ~$38 est.`; superseded 2026-10-12 by `▤ $<engine cost>`, then by `⧗ <today's hours>h` (figures only, no names) | §6.5 |
+| PRV-13 | minor | adopted: `2.4h today · ~$38 est.`; superseded 2026-10-12 by `▤ $<engine cost>`, then by `⧗<today's hours>h` (figures only, no names) | §6.5 |
 | PRV-14 | minor | adopted: caveats | §6.1 |
 | PRV-15 | minor | adopted: fictitious examples; real strings in the pre-publish scan | ADR-006 |
 | DBM-1 | blocker | adopted (with PRV-1) | §3.4 |

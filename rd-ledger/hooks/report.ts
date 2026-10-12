@@ -397,8 +397,8 @@ export const monthlyLogPages = (month: string, blocks: readonly Block[], allocat
 
 /** U+29D7, a black hourglass: a monochrome mathematical symbol, not an emoji (the emoji hourglass is U+231B). */
 export const TIME_MARK = '\u29D7'
-/** The footer chip never grows past this many characters, so the strip never clips it. */
-export const FOOTER_MAX = 10
+/** The footer chip never grows past this many characters, so the strip never clips it (no space after the mark: the strip is shared with other mods' chips). */
+export const FOOTER_MAX = 9
 
 /**
  * The footer chip: the hourglass mark and today's recorded R&D hours (the
@@ -408,10 +408,10 @@ export const FOOTER_MAX = 10
  * The one label SessionMode and PromptHint share.
  */
 export const footerLabel = (todayS: number | null): string => {
-  if (todayS === null) return `${TIME_MARK} --`
+  if (todayS === null) return `${TIME_MARK}--`
   const tenths = Number.isFinite(todayS) ? Math.round((Math.max(0, todayS) / 3600) * 10) : 0
-  if (tenths >= 100_000) return `${TIME_MARK} 9999h+`
-  return `${TIME_MARK} ${(tenths / 10).toFixed(1)}h`
+  if (tenths >= 100_000) return `${TIME_MARK}9999h+`
+  return `${TIME_MARK}${(tenths / 10).toFixed(1)}h`
 }
 
 /**

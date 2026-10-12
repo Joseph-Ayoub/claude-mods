@@ -468,12 +468,12 @@ via `csvCell`. Export reads the files, never `$.state`.
 
 ### 6.5 Footer
 
-Desktop `SessionMode`: one `Button` chip `⧗ 2.4h`: the mark U+29D7 BLACK HOURGLASS (a
+Desktop `SessionMode`: one `Button` chip `⧗2.4h`: the mark U+29D7 BLACK HOURGLASS (a
 monochrome mathematical symbol, not an emoji; the emoji hourglass is U+231B), a space, and
 today's recorded R&D hours with one decimal: `Rollup.todayS` (seconds of engaged union time
 admitted today, local day, the figure the Overview's "today" line shows) divided by 3600.
-Before the rollup exists the label is `⧗ --`; a negative or non-finite figure reads `⧗ 0.0h`;
-from 9999.95 hours a floor `⧗ 9999h+`, never a clipped number. The label is at most 10
+Before the rollup exists the label is `⧗--`; a negative or non-finite figure reads `⧗0.0h`;
+from 9999.95 hours a floor `⧗9999h+`, never a clipped number. The label is at most 10
 characters, so the strip never clips it, and the mod never truncates it. It carries no cost:
 the usage-gauge mod owns the session cost in the footer (`Rollup.engineUsd` stays, for the
 Session view). One helper, `footerLabel(todayS)` in `report.ts`, draws it for both surfaces.
@@ -574,7 +574,7 @@ salted root hash. No user name, email, path, title, or stderr.
 
 | Option | Type | Default | Observable (the test pair) |
 |---|---|---|---|
-| `footerButton` | boolean | true | Button vs Text (`⧗ <hours>h`) in the footer |
+| `footerButton` | boolean | true | Button vs Text (`⧗<hours>h`) in the footer |
 | `refreshMinutes` | number 1–60 | 5 | refresh count after advancing N minutes |
 | `idleGapMinutes` | number 5–120 | 30 | the merge result and the method hash |
 | `cacheTtl` | `5m` / `1h` | `5m` | ×1.25 vs ×2.0 |

@@ -14,7 +14,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { DiskReport, SessionRow, Snapshot, WrapRequest } from '../types'
 import { advise, applyHome, compactReport, diskActionArgv, diskActionLabel, diskActionQuestion, diskAdvice, quitAppArgv, summaryLine } from './advice'
-import type { Advice, AdviceOptions, DiskAdvice } from './advice'
+import type { Advice, AdviceAction, AdviceOptions, DiskAdvice } from './advice'
+import { HANDOFF_PROMPT, handoffFile, handoffPath } from './handoff'
 import {
   bar,
   basename,
@@ -84,6 +85,8 @@ const DISK_FOLDERS: readonly { rel: string; label: string }[] = [
 ]
 const ASK = 'Ask to wrap'
 const APPLY = 'Apply'
+const COMPACT = 'Compact'
+const HAND_OFF = 'Hand off'
 /** An Apply's command (a find over a big folder, simctl) may take a while. */
 const APPLY_TIMEOUT_MS = 120_000
 /** An app asked to quit may first show a save sheet; the request is delivered either way. */
@@ -136,6 +139,9 @@ let config = { intervalMs: 30_000, advice: { idleMinutes: 30 } as AdviceOptions,
 let timer: { cancel: () => void } | null = null
 let running: Promise<TickResult | null> | null = null
 let diskScan: Promise<void> | null = null
+// True while a main-loop turn runs (turn.start to turn.complete): a hand-off then waits, so
+// the note is written over the whole turn and /clear does not cut it short.
+let turnInFlight = false
 // Apply presses in flight, by tip key, each under a token so only the press that claimed releases
 // (a reload resets the map; a claim from before it can no longer clear a new one). Mirrored to $.state for drawing.
 let applying = new Map<string, number>()
@@ -642,13 +648,17 @@ async function applyDisk($: Dollar, tip: DiskAdvice): Promise<void> {
   if (ran) void runDiskScan($, true)
 }
 
+/** A Memory tip button's label, by what it does: the context tip names its two ways out, every other kind reads Apply. */
+const actionLabel = (action: AdviceAction): string => (action.kind === 'compact' ? 'Compact' : action.kind === 'hand-off' ? HAND_OFF : APPLY)
+
 /**
- * Apply on a Memory tip: Ask to wrap (the existing flow, with its own
- * confirmation), compact this session, quit an app gracefully (confirmed), or
- * open the Disk pane. A tip with no action has no button.
+ * A press on a Memory tip's button (`action`, the tip's own by default; the
+ * Hand off button passes `tip.secondary`): Ask to wrap (the existing flow, with
+ * its own confirmation), compact this session, hand it off to a fresh one,
+ * quit an app gracefully (confirmed), or open the Disk pane. A tip with no
+ * action has no button.
  */
-async function applyMemory($: Dollar, tip: Advice, rowsById: ReadonlyMap<string, SessionRow>): Promise<void> {
-  const action = tip.action
+async function applyMemory($: Dollar, tip: Advice, rowsById: ReadonlyMap<string, SessionRow>, action = tip.action): Promise<void> {
   if (!action) return
   if (action.kind === 'ask-wrap') {
     const target = rowsById.get(action.sessionId)
@@ -659,6 +669,12 @@ async function applyMemory($: Dollar, tip: Advice, rowsById: ReadonlyMap<string,
     await openDiskPane($)
     return
   }
+  if (action.kind === 'hand-off') {
+    await handOff($, tip)
+    return
+  }
+  // A compact queued behind a hand-off's /clear (or the reverse) would act on the wrong conversation: one at a time per tip.
+  if (applying.has(`handoff:${tip.key}`)) return
   const key = `memory:${tip.key}`
   const token = await beginApply($, key)
   if (token === null) return
@@ -666,11 +682,11 @@ async function applyMemory($: Dollar, tip: Advice, rowsById: ReadonlyMap<string,
     if (action.kind === 'compact') {
       let choice: string
       try {
-        choice = await $.ui.ask('Compact this session now (the conversation so far is summarized to free context)?', { options: [APPLY, 'Cancel'], header: 'Memory' })
+        choice = await $.ui.ask('Compact this session now (the conversation so far is summarized to free context)?', { options: [COMPACT, 'Cancel'], header: 'Memory' })
       } catch {
         return
       }
-      if (choice !== APPLY) return
+      if (choice !== COMPACT) return
       try {
         await $.command.run({ command: 'compact' })
         $.ui.toast('Memory: /compact queued; it runs when the session is idle.')
@@ -703,6 +719,115 @@ async function applyMemory($: Dollar, tip: Advice, rowsById: ReadonlyMap<string,
       )
     }
     void runTick($)
+  } finally {
+    await endApply($, key, token)
+  }
+}
+
+/** Why a fork gave no note, for a toast: its reason, an API error's status (or kind when no response came). */
+const forkFailure = (r: { reason: string; status?: number | null; error?: string }): string =>
+  r.reason === 'api-error' ? `api-error ${r.status ?? r.error ?? 'unknown'}` : r.reason
+
+/**
+ * Hand off this session to a fresh one: confirmed, then one tool-less model
+ * call over this session's own transcript ($.model.fork, served from its
+ * prompt cache) writes a handoff note, the mod cleans and redacts it and
+ * writes it under ~/.claude/handoffs/, then runs /clear and pre-fills the
+ * composer with a line pointing at the note. The person presses Enter: the
+ * fresh session's first prompt is never sent on its own.
+ *
+ * The order is the safety: nothing is cleared until the note is on disk, so a
+ * refused fork, an empty reply or a failed write leaves the conversation as it
+ * was, and a refused /clear leaves the note and says where it is. The old
+ * conversation stays resumable by the id the header names. Nothing here runs a
+ * process, touches the repository, or writes outside ~/.claude/handoffs/.
+ */
+async function handOff($: Dollar, tip: Advice): Promise<void> {
+  // A hand-off while this tip's compact is in flight would clear what the compact is about to summarize.
+  if (applying.has(`memory:${tip.key}`)) return
+  // Mid-turn, the note would miss the turn's work and /clear would cut it off: wait for the end.
+  if (turnInFlight) {
+    $.ui.toast('Memory: a turn is running; hand off once it has finished, so the note covers it.')
+    return
+  }
+  const key = `handoff:${tip.key}`
+  const token = await beginApply($, key)
+  if (token === null) return
+  try {
+    let choice: string
+    try {
+      // AskUserQuestion wants the question to end in a question mark, so what happens comes first.
+      choice = await $.ui.ask(
+        'A handoff note is written from this conversation, the conversation is cleared (the old one stays resumable by its id), and the next prompt is pre-filled to continue from the note. Hand off to a fresh session?',
+        { options: [HAND_OFF, 'Cancel'], header: 'Memory' },
+      )
+    } catch {
+      return // dismissed, or nobody to ask (-p)
+    }
+    if (choice !== HAND_OFF) return
+
+    const sessionId = await $.session.id()
+    const cwd = await $.session.cwd()
+    if (!isSessionId(sessionId)) {
+      $.ui.toast('Memory: hand off failed (no session id); nothing was cleared.')
+      return
+    }
+    // Checked before the model call, so a note that could never be written costs nothing.
+    const home = applyHome(await homeDir($))
+    if (!home) {
+      $.ui.toast('Memory: could not write the handoff note (HOME unknown); nothing was cleared.')
+      return
+    }
+    const label = (await read($, labelRef)) ?? (oneLine(basename(cwd), 100) || 'session')
+
+    const r = await $.model.fork({ prompt: HANDOFF_PROMPT })
+    if (!r.isAnswered) {
+      $.ui.toast(
+        r.reason === 'nothing-to-fork'
+          ? 'Memory: nothing to hand off yet.'
+          : `Memory: the handoff note could not be written (${forkFailure(r)}).`,
+      )
+      return
+    }
+    const now = await $.clock.now()
+    const text = handoffFile(r.text, label, sessionId, now)
+    if (text === '') {
+      $.ui.toast('Memory: the handoff note could not be written (empty-reply).')
+      return
+    }
+    const path = handoffPath(home, label, sessionId, now)
+    try {
+      await $.fs.write(path, text)
+    } catch (err) {
+      $.ui.toast(`Memory: could not write the handoff note (${kindOf(err)}); nothing was cleared.`)
+      return
+    }
+
+    try {
+      await $.command.run({ command: 'clear' })
+    } catch {
+      $.ui.toast(`Memory: note written at ${path}; run /clear yourself when ready.`)
+      return
+    }
+
+    let isFilled = false
+    try {
+      // A draft the person typed meanwhile is kept: the continue line goes under it.
+      let hasDraft = false
+      try {
+        hasDraft = (await $.prompt.read()).text.trim() !== ''
+      } catch {
+        hasDraft = false
+      }
+      const line = `Continue from the handoff note at ${path}: read it first, then carry on with its next step.`
+      const filled = await $.prompt.fill(hasDraft ? { text: `\n${line}`, mode: 'append' } : { text: line, mode: 'replace' })
+      isFilled = filled.isFilled
+    } catch {
+      // The note and the clear stand; the toast says where the note is.
+    }
+    $.ui.toast(`Memory: handoff note at ${path}; the conversation was cleared.${isFilled ? '' : ' Paste that path into the next prompt.'}`)
+  } catch (err) {
+    $.ui.toast(`Memory: hand off failed (${kindOf(err)}).`)
   } finally {
     await endApply($, key, token)
   }
@@ -800,6 +925,7 @@ export const register: Register = (on, options) => {
   // Activity marks the session busy; turn.start fires for the main loop only.
   // Its prompt text is never read.
   on('turn.start', async ($, e, next) => {
+    turnInFlight = true
     const result = await next(e)
     try {
       await markActive($)
@@ -813,6 +939,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId === undefined) {
+      turnInFlight = false
       try {
         await markActive($)
         arm($)
@@ -947,14 +1074,14 @@ export const register: Register = (on, options) => {
     const wrap = await read($, wrapRef)
     const m = snapshot.machine
     const { Box, Text, Button } = $.ui.resolve(e)
-    const { used, disk, alarm } = footerParts(snapshot, wrap)
+    const { used, disk, diskPct, alarm } = footerParts(snapshot, wrap)
     const openMemory = () => void openPane($).catch(() => undefined)
     const openDisk = () => void openDiskPane($).catch(() => undefined)
     if (config.footerButtons && config.footerCompact) {
-      // Both figures in one chip, so the strip holds other mods' chips too; Disk is a button in the Memory pane.
+      // Both figures in one tight chip (memory used %, disk used %), so the strip holds other mods' chips too; Disk is a button in the Memory pane.
       return (
         <Box flexDirection="row" alignItems="center" gap={1}>
-          <Button key="mem-gauge" plain label={`${glyph(m.usedPercent)} ${alarm ? '! ' : ''}${used} · ${DISK_GLYPH} ${disk}`} onPress={openMemory} />
+          <Button key="mem-gauge" plain label={`${glyph(m.usedPercent)}${alarm ? '!' : ''}${used} ${DISK_GLYPH}${diskPct}`} onPress={openMemory} />
           {engine}
         </Box>
       )
@@ -1159,15 +1286,25 @@ export const register: Register = (on, options) => {
             const askedAt = target ? asked[target.sessionId] : undefined
             const isRecent = tip.action?.kind === 'ask-wrap' && askedAt !== undefined && now - askedAt < ASK_EVERY_MS
             const inFlight = applying.includes(`memory:${tip.key}`)
+            // While one of the tip's two actions runs, the other is dim (and its press is ignored in applyMemory / handOff).
+            const isHandingOff = applying.includes(`handoff:${tip.key}`)
             return (
               <Box key={`tip:${tip.key}`} flexDirection="row" gap={1}>
                 <Text wrap="wrap">{tip.text}</Text>
                 {tip.action && (
                   <Button
                     key={`apply:${tip.key}`}
-                    label={isRecent ? 'Asked' : inFlight ? 'Applying…' : APPLY}
-                    dimColor={isRecent || inFlight}
+                    label={isRecent ? 'Asked' : inFlight ? 'Applying…' : actionLabel(tip.action)}
+                    dimColor={isRecent || inFlight || isHandingOff}
                     onPress={() => void applyMemory($, tip, rowsById).catch(() => undefined)}
+                  />
+                )}
+                {tip.secondary && (
+                  <Button
+                    key={`handoff:${tip.key}`}
+                    label={isHandingOff ? 'Writing note…' : actionLabel(tip.secondary)}
+                    dimColor={isHandingOff || inFlight}
+                    onPress={() => void applyMemory($, tip, rowsById, tip.secondary).catch(() => undefined)}
                   />
                 )}
               </Box>

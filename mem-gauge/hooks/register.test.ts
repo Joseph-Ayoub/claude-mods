@@ -34,7 +34,29 @@ type WorldOptions = {
   isRmSlow?: boolean
   /** A hook beneath denies $.ui.close. */
   isCloseDenied?: boolean
+  /** This session's context fill as $.session.usage reads it (42 by default). */
+  contextPercent?: number
+  /** What $.model.fork answers; a note with the six sections by default. */
+  fork?: Record<string, unknown>
+  /** While set, the fork waits on it: a hand-off held in flight. */
+  forkHold?: Promise<void>
+  /** fs.write under ~/.claude/handoffs/ is refused (the other writes go through). */
+  isHandoffWriteRefused?: boolean
+  /** The /clear the plugin runs is rejected. */
+  isClearRefused?: boolean
+  /** How the prompt box answers $.prompt.fill: filled, refused (a dialog holds the keys), or the call throws. */
+  fill?: 'filled' | 'refused' | 'throws'
+  /** What the prompt box holds when $.prompt.read is asked (a draft the person typed); empty by default. */
+  draft?: string
+  /** While set, the /compact the plugin runs waits on it: a compact held in flight. */
+  compactHold?: Promise<void>
+  /** The session's root and working folder (the label's repo part is its basename). */
+  root?: string
+  /** HOME as the environment gives it. */
+  home?: string
 }
+
+const NOTE = '## Goal\nShip mem-gauge 0.2.0.\n\n## Next steps\n1. Run the tests.'
 
 /**
  * Everything beneath the plugin: a clock, HOME, an in-memory file system, the
@@ -59,9 +81,19 @@ function world(on: On, options: WorldOptions = {}) {
     order: [] as string[],
     /** While set, vm_stat waits on it: a tick held in flight. */
     hold: null as Promise<void> | null,
+    /** The prompts $.model.fork was asked. */
+    forks: [] as string[],
+    /** The slash commands the plugin ran. */
+    commands: [] as string[],
+    /** What $.prompt.fill was asked to put in the box. */
+    fills: [] as string[],
+    /** The mode of each $.prompt.fill: replace, or append under a draft. */
+    fillModes: [] as string[],
+    /** The hand-off's steps beneath, in order: fork, write (a handoff note), clear, fill. */
+    steps: [] as string[],
   }
   let shCalls = 0
-  mock.env(on, { HOME })
+  mock.env(on, { HOME: options.home ?? HOME })
   const refuse = { deny: 'refused in this test' }
 
   on('fs.read', (_$, e) => {
@@ -71,6 +103,10 @@ function world(on: On, options: WorldOptions = {}) {
   })
   on('fs.write', (_$, e) => {
     if (options.isLockedDown) return refuse
+    if (e.path.startsWith(`${HOME}/.claude/handoffs/`)) {
+      if (options.isHandoffWriteRefused) return refuse
+      seen.steps.push('write')
+    }
     files.set(e.path, { text: e.text, mtimeMs: seen.clock.now() })
     return { value: undefined }
   })
@@ -121,11 +157,11 @@ function world(on: On, options: WorldOptions = {}) {
 
   on('session.id', () => ({ value: seen.sessionId }))
   on('session.surfaces', () => ({ value: options.isHeadless ? [] : (['terminal'] as const) }))
-  on('session.cwd', () => ({ value: '/work/claude-skills-lab' }))
-  on('session.root', () => ({ value: '/work/claude-skills-lab' }))
+  on('session.cwd', () => ({ value: options.root ?? '/work/claude-skills-lab' }))
+  on('session.root', () => ({ value: options.root ?? '/work/claude-skills-lab' }))
   on('session.model', () => ({ value: 'claude-fable-5-1' }))
   on('session.usage', () => (options.isUsageRefused ? refuse : {
-    value: { startedAt: T0 - 60_000, context: { window: 200_000, percent: 42 }, rateLimits: [{ kind: 'five_hour', percentUsed: 30 }] },
+    value: { startedAt: T0 - 60_000, context: { window: 200_000, percent: options.contextPercent ?? 42 }, rateLimits: [{ kind: 'five_hour', percentUsed: 30 }] },
   }) as never)
   on('agent.list', () => ({
     value: [
@@ -160,6 +196,29 @@ function world(on: On, options: WorldOptions = {}) {
     seen.asked.push(question)
     if (options.isDismissed) return { deny: 'dismissed' } as never
     return { result: { questions: e.questions, answers: { [question]: options.answer ?? 'Ask to wrap' } } } as never
+  })
+  on('model.fork', async (_$, e) => {
+    seen.forks.push(e.prompt)
+    seen.steps.push('fork')
+    if (options.forkHold) await options.forkHold
+    return { value: (options.fork ?? { isAnswered: true, text: NOTE, usage: { input_tokens: 10, output_tokens: 20 } }) as never }
+  })
+  for (const command of ['clear', 'compact']) {
+    on('command.run', { command }, async (_$, e) => {
+      seen.commands.push(e.command)
+      seen.steps.push(e.command)
+      if (e.command === 'clear' && options.isClearRefused) throw new Error('refused in this test')
+      if (e.command === 'compact' && options.compactHold) await options.compactHold
+      return {}
+    })
+  }
+  on('prompt.read', () => ({ value: { text: options.draft ?? '', cursor: 0 } }) as never)
+  on('prompt.fill', (_$, e) => {
+    seen.fills.push(e.text)
+    seen.fillModes.push(e.mode ?? 'replace')
+    seen.steps.push('fill')
+    if (options.fill === 'throws') throw new Error('refused in this test')
+    return options.fill === 'refused' ? { isFilled: false, refusal: 'dialog' as const } : { isFilled: true }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.end', (_$, e) => {
@@ -865,7 +924,7 @@ describe('activity and the timer', () => {
     await seen.clock.settle()
     expect(entryOf(seen)).toMatchObject({ contextPercent: 91, rateLimitPercent: 55 })
     const pane = await $.ui.mount({ plugin: 'mem-gauge', surface: 'terminal', ...PANE })
-    expect(await pane.find({ type: 'Text', text: /context 91%, \/compact or hand off/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /context 91%\. Compact to keep going mid-task, or hand off at a milestone/ })).toBeDefined()
     await pane.unmount()
   })
 
@@ -1135,7 +1194,7 @@ describe('one footer chip (footerCompact)', () => {
     await start($, seen)
     const mode = await $.ui.mount({ plugin: 'mem-gauge', surface: 'desktop', ...MODE })
     const buttons = await mode.findAll({ type: 'Button' })
-    expect(buttons.map(button => [button.key, button.props['label']])).toEqual([['mem-gauge', '◔ 38% · \u26C1 927 GB']])
+    expect(buttons.map(button => [button.key, button.props['label']])).toEqual([['mem-gauge', '◔38% \u26C150%']])
     expect(JSON.stringify(await mode.drawn())).toContain('"type":"engine"')
     await mode.press({ key: 'mem-gauge' })
     await mode.unmount()
@@ -1146,5 +1205,294 @@ describe('one footer chip (footerCompact)', () => {
     await pane.press({ key: 'disk' })
     await pane.unmount()
     expect(seen.opened).toEqual(['mem-gauge', 'mem-gauge-disk'])
+  })
+})
+
+describe('the context tip: Compact and Hand off', () => {
+  const TIP = `context:${THIS}`
+  const HANDOFFS = `${HOME}/.claude/handoffs/`
+  const NOTE_PATH = `${HANDOFFS}2027-01-15-080000-claude-skills-lab-11111111.md`
+  const QUESTION =
+    'A handoff note is written from this conversation, the conversation is cleared (the old one stays resumable by its id), and the next prompt is pre-filled to continue from the note. Hand off to a fresh session?'
+  const notes = (seen: World) => [...seen.files.keys()].filter(path => path.startsWith(HANDOFFS))
+  const answered = (text: string) => ({ isAnswered: true, text, usage: { input_tokens: 1, output_tokens: 1 } })
+
+  async function mountPane($: Engine, seen: World) {
+    await start($, seen)
+    return $.ui.mount({ plugin: 'mem-gauge', surface: 'terminal', ...PANE })
+  }
+
+  test('this session draws Compact and Hand off; another session\'s tip has no button', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, files: { [`${DIR}/sessions/${OTHER}.json`]: otherEntry({ contextPercent: 90 }) } })
+    const pane = await mountPane($, seen)
+    expect((await pane.find({ key: `apply:${TIP}` }))?.props['label']).toBe('Compact')
+    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['label']).toBe('Hand off')
+    expect(await pane.find({ type: 'Text', text: /context 91%\. Compact to keep going mid-task, or hand off at a milestone \(a note is written for the fresh session\)\./ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: 'shop · feat/cart: context 90%, compact or hand off from there' })).toBeDefined()
+    expect(await pane.find({ key: `apply:context:${OTHER}` })).toBeUndefined()
+    expect(await pane.find({ key: `handoff:context:${OTHER}` })).toBeUndefined()
+    // Every other tip keeps its Apply.
+    expect((await pane.find({ key: `apply:idle:${OTHER}` }))?.props['label']).toBe('Apply')
+    await pane.unmount()
+  })
+
+  test('Hand off: confirm, fork, note on disk, then /clear, then the composer is filled; nothing is submitted', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off' })
+    const pane = await mountPane($, seen)
+    const ran = seen.argv.length
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.asked).toEqual([QUESTION])
+    expect(seen.forks).toHaveLength(1)
+    expect(seen.forks[0]).toContain('Never include credentials, tokens, keys, passwords, account numbers or personal data')
+    // The note is on disk before anything is cleared.
+    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
+    expect(notes(seen)).toEqual([NOTE_PATH])
+    const text = seen.files.get(NOTE_PATH)?.text ?? ''
+    expect(text).toMatch(/^# Handoff — claude-skills-lab · [^\n]+ — 2027-01-15T08:00:00\.000Z\n/)
+    expect(text).toContain(`From session ${THIS}; the old conversation stays resumable: claude --resume ${THIS}\n\n## Goal\nShip mem-gauge 0.2.0.`)
+    expect(seen.commands).toEqual(['clear'])
+    expect(seen.fills).toEqual([`Continue from the handoff note at ${NOTE_PATH}: read it first, then carry on with its next step.`])
+    expect(seen.toasts[seen.toasts.length - 1]).toBe(`Memory: handoff note at ${NOTE_PATH}; the conversation was cleared.`)
+    // No process ran, and the button is free again.
+    expect(seen.argv.slice(ran)).toEqual([])
+    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['label']).toBe('Hand off')
+    await pane.unmount()
+  })
+
+  test('a composer that refuses the fill: the clear stands and the toast says to paste the path', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fill: 'refused' })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
+    expect(seen.toasts[seen.toasts.length - 1]).toBe(`Memory: handoff note at ${NOTE_PATH}; the conversation was cleared. Paste that path into the next prompt.`)
+    await pane.unmount()
+  })
+
+  test('a fill that throws is caught the same way', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fill: 'throws' })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
+    expect(seen.toasts[seen.toasts.length - 1]).toBe(`Memory: handoff note at ${NOTE_PATH}; the conversation was cleared. Paste that path into the next prompt.`)
+    await pane.unmount()
+  })
+
+  test('Cancel does nothing', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Cancel' })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.asked).toHaveLength(1)
+    expect(seen.steps).toEqual([])
+    expect(notes(seen)).toEqual([])
+    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['label']).toBe('Hand off')
+    await pane.unmount()
+  })
+
+  test('a dismissed dialog does nothing', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, isDismissed: true })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.asked).toHaveLength(1)
+    expect(seen.steps).toEqual([])
+    expect(notes(seen)).toEqual([])
+    await pane.unmount()
+  })
+
+  test('nothing to fork yet: a toast, no note, nothing cleared', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fork: { isAnswered: false, reason: 'nothing-to-fork' } })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: nothing to hand off yet.')
+    expect(seen.steps).toEqual(['fork'])
+    expect(notes(seen)).toEqual([])
+    await pane.unmount()
+  })
+
+  test('an API error: a toast with the status, no note, nothing cleared', async ($, on) => {
+    const usage = { input_tokens: 0, output_tokens: 0 }
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fork: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage } })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: the handoff note could not be written (api-error 529).')
+    expect(seen.steps).toEqual(['fork'])
+    expect(notes(seen)).toEqual([])
+    await pane.unmount()
+  })
+
+  test('a reply with no text once cleaned: a toast, no note, nothing cleared', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fork: answered(' \u001b[0m\n\n') })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: the handoff note could not be written (empty-reply).')
+    expect(seen.steps).toEqual(['fork'])
+    await pane.unmount()
+  })
+
+  test('the note cannot be written: a toast, nothing cleared', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', isHandoffWriteRefused: true })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.toasts[seen.toasts.length - 1]).toMatch(/^Memory: could not write the handoff note \([^)]+\); nothing was cleared\.$/)
+    expect(seen.steps).toEqual(['fork'])
+    expect(seen.commands).toEqual([])
+    expect(notes(seen)).toEqual([])
+    await pane.unmount()
+  })
+
+  test('/clear refused: the note stays, the toast names it, the composer is not filled', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', isClearRefused: true })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.steps).toEqual(['fork', 'write', 'clear'])
+    expect(notes(seen)).toEqual([NOTE_PATH])
+    expect(seen.fills).toEqual([])
+    expect(seen.toasts[seen.toasts.length - 1]).toBe(`Memory: note written at ${NOTE_PATH}; run /clear yourself when ready.`)
+    await pane.unmount()
+  })
+
+  test('hostile note text is cleaned and redacted on disk', async ($, on) => {
+    const hostile = '## Goal\n\u001b[31mred\u001b[0m \u001b]0;pwned\u0007ok\nBIDI_OVERRIDEevilZERO_WIDTH text\nkey sk-ant-api03-abcdefgh12345678 and AKIAABCDEFGHIJKLMNOP\n'
+      .replace('BIDI_OVERRIDE', String.fromCodePoint(0x202e))
+      .replace('ZERO_WIDTH', String.fromCodePoint(0x200b))
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fork: answered(hostile) })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    const text = seen.files.get(NOTE_PATH)?.text ?? ''
+    expect(text).toContain('## Goal\nred ok\nevil text\nkey [redacted] and [redacted]\n')
+    for (const bad of ['\u001b', '\u0007', String.fromCodePoint(0x202e), String.fromCodePoint(0x200b), 'sk-ant', 'AKIA']) expect(text).not.toContain(bad)
+    await pane.unmount()
+  })
+
+  test('a 30,000-character note is cut with the marker', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fork: answered('x'.repeat(30_000)) })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    const text = seen.files.get(NOTE_PATH)?.text ?? ''
+    expect(text.endsWith('\n… (cut)\n')).toBe(true)
+    expect(text.split('\n\n')[1]).toBe(`${'x'.repeat(20_000)}\n… (cut)\n`)
+    await pane.unmount()
+  })
+
+  test('Compact still runs /compact after its confirmation', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Compact' })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `apply:${TIP}` })
+    expect(seen.asked).toEqual(['Compact this session now (the conversation so far is summarized to free context)?'])
+    expect(seen.commands).toEqual(['compact'])
+    expect(seen.forks).toEqual([])
+    expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: /compact queued; it runs when the session is idle.')
+    expect((await pane.find({ key: `apply:${TIP}` }))?.props['label']).toBe('Compact')
+    await pane.unmount()
+  })
+
+  test('while a hand-off is in flight its button reads Writing note…, a second press and Compact are ignored', async ($, on) => {
+    let release = () => {}
+    const forkHold = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', forkHold })
+    const pane = await mountPane($, seen)
+    const first = pane.press({ key: `handoff:${TIP}` })
+    await yieldTurns(500)
+    expect(seen.forks).toHaveLength(1)
+    const handoff = await pane.find({ key: `handoff:${TIP}` })
+    expect([handoff?.props['label'], handoff?.props['dimColor']]).toEqual(['Writing note…', true])
+    expect((await pane.find({ key: `apply:${TIP}` }))?.props['dimColor']).toBe(true)
+    await pane.press({ key: `handoff:${TIP}` })
+    await pane.press({ key: `apply:${TIP}` })
+    expect(seen.asked).toHaveLength(1)
+    expect(seen.commands).toEqual([])
+    release()
+    await first
+    // The kit settles the first press while its fork is held; the rest of the flow runs on after the release.
+    await yieldTurns(2000)
+    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
+    expect(seen.forks).toHaveLength(1)
+    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['label']).toBe('Hand off')
+    expect((await pane.find({ key: `apply:${TIP}` }))?.props['dimColor']).toBe(false)
+    await pane.unmount()
+  })
+
+  test('Hand off is ignored while this tip\'s Compact runs (the guard works both ways)', async ($, on) => {
+    let release = () => {}
+    const compactHold = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const seen = world(on, { contextPercent: 91, answer: 'Compact', compactHold })
+    const pane = await mountPane($, seen)
+    const first = pane.press({ key: `apply:${TIP}` })
+    await yieldTurns(500)
+    expect(seen.commands).toEqual(['compact'])
+    const handoff = await pane.find({ key: `handoff:${TIP}` })
+    expect([handoff?.props['label'], handoff?.props['dimColor']]).toEqual(['Hand off', true])
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.asked).toHaveLength(1)
+    expect(seen.forks).toEqual([])
+    release()
+    await first
+    await yieldTurns(500)
+    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['dimColor']).toBe(false)
+    await pane.unmount()
+  })
+
+  test('a running turn defers the hand off; after the turn ends it goes ahead', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off' })
+    const pane = await mountPane($, seen)
+    await $.turn.start({ text: '', turnId: 't1' })
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.asked).toEqual([])
+    expect(seen.steps).toEqual([])
+    expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: a turn is running; hand off once it has finished, so the note covers it.')
+    await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.asked).toHaveLength(1)
+    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
+    await pane.unmount()
+  })
+
+  test('a draft in the prompt box is kept: the continue line is appended under it', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', draft: 'half a thought' })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.fillModes).toEqual(['append'])
+    expect(seen.fills).toEqual([`\nContinue from the handoff note at ${NOTE_PATH}: read it first, then carry on with its next step.`])
+    await pane.unmount()
+  })
+
+  test('an unusable HOME stops the hand off before the model call', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', home: 'relative/home' })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.asked).toHaveLength(1)
+    expect(seen.steps).toEqual([])
+    expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: could not write the handoff note (HOME unknown); nothing was cleared.')
+    await pane.unmount()
+  })
+
+  test('a repo name that is only dots cannot shape the note path: the file is named session', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', root: '/w/evil name/..' })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
+    expect(notes(seen)).toEqual([`${HANDOFFS}2027-01-15-080000-session-11111111.md`])
+    await pane.unmount()
+  })
+
+  test('a repo name with a space and a bidi override becomes a plain file-name piece', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, answer: 'Hand off', root: '/w/my repo\u202E' })
+    const pane = await mountPane($, seen)
+    await pane.press({ key: `handoff:${TIP}` })
+    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
+    expect(notes(seen)).toEqual([`${HANDOFFS}2027-01-15-080000-my-repo-11111111.md`])
+    await pane.unmount()
+  })
+
+  test('the plain /mem table lists the tip text, with no button words', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, isPlaced: false })
+    await start($, seen)
+    const ran = await runMem($)
+    expect(ran.text).toContain('context 91%. Compact to keep going mid-task, or hand off at a milestone (a note is written for the fresh session).')
+    expect(ran.text).not.toContain('Writing note')
+    expect(ran.text).not.toContain('Hand off')
   })
 })

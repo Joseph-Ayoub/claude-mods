@@ -7,13 +7,15 @@ import type { DiskReport, Snapshot } from '../types'
 import { formatBytes, formatMB, pressureText, shortModel } from './parse'
 
 /**
- * What the Memory pane's Apply button does for a tip. Every kind confirms
- * first and runs a fixed command or an existing flow; none takes text from a
- * process or a file into a shell (there is no shell: argv only).
+ * What a Memory pane tip's button does. Every kind confirms first and runs a
+ * fixed command or an existing flow; none takes text from a process or a file
+ * into a shell (there is no shell: argv only). `hand-off` writes a note with
+ * one model call, then clears the conversation (register.tsx `handOff`).
  */
 export type AdviceAction =
   | { kind: 'ask-wrap'; sessionId: string }
   | { kind: 'compact' }
+  | { kind: 'hand-off' }
   | { kind: 'quit-app'; app: string }
   | { kind: 'open-disk' }
 
@@ -23,8 +25,10 @@ export type Advice = {
   text: string
   /** The session this advice targets, when the pane may offer "Ask to wrap". */
   sessionId?: string
-  /** What Apply does; absent, the tip is advice only (sequence agents, pause suites, a session with no mod). */
+  /** What the tip's button does; absent, the tip is advice only (sequence agents, pause suites, a session with no mod). */
   action?: AdviceAction
+  /** A second button beside it, where a tip offers two ways out (this session's context: Compact, or Hand off). */
+  secondary?: AdviceAction
 }
 
 /** What the Disk pane's Apply button does for a tip; each a fixed argv (diskActionArgv). */
@@ -72,12 +76,18 @@ export function advise(snapshot: Snapshot, options: AdviceOptions): Advice[] {
 
   for (const s of live) {
     if (s.contextPercent !== null && s.contextPercent > CONTEXT_HIGH) {
-      out.push({
-        key: `context:${s.sessionId}`,
-        // Only this session can be compacted from here.
-        ...(s.isThis ? { action: { kind: 'compact' as const } } : {}),
-        text: `${s.label}: context ${Math.round(s.contextPercent)}%, /compact or hand off to a fresh session`,
-      })
+      const pct = Math.round(s.contextPercent)
+      // Only this session can be compacted or handed off from here; another's tip is advice only.
+      out.push(
+        s.isThis
+          ? {
+              key: `context:${s.sessionId}`,
+              action: { kind: 'compact' },
+              secondary: { kind: 'hand-off' },
+              text: `${s.label}: context ${pct}%. Compact to keep going mid-task, or hand off at a milestone (a note is written for the fresh session).`,
+            }
+          : { key: `context:${s.sessionId}`, text: `${s.label}: context ${pct}%, compact or hand off from there` },
+      )
     }
   }
 
