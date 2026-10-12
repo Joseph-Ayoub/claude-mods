@@ -42,6 +42,9 @@ export type SessionRow = {
   model: string
   rssMB: number | null
   contextPercent: number | null
+  /** Input tokens the last response was answered over, and the model's window; null when unknown (an older build's heartbeat, a fresh session). */
+  contextTokens: number | null
+  contextWindow: number | null
   rateLimitPercent: number | null
   agents: number
   idleMinutes: number | null
@@ -86,7 +89,12 @@ export type DiskReport = { at: number; volumes: VolumeRow[]; folders: FolderSize
 export type WrapRequest = { at: number; freesMB: number | null }
 
 /** This session's context and rate-limit figures, pushed by session.measure. */
-export type Figures = { contextPercent: number | null; rateLimitPercent: number | null }
+export type Figures = {
+  contextPercent: number | null
+  contextTokens: number | null
+  contextWindow: number | null
+  rateLimitPercent: number | null
+}
 
 declare module 'claude-code' {
   interface PluginState {

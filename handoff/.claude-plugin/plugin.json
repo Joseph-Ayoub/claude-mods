@@ -1,0 +1,8 @@
+{
+  "name": "handoff",
+  "version": "0.1.0",
+  "description": "/handoff: a handoff note written from this session (secret shapes redacted) under ~/.claude/handoffs/, the conversation cleared, the next prompt pre-filled to continue from the note. What mem-gauge's Hand off button and the cockpit chip run.",
+  "author": {
+    "name": "Joseph Ayoub"
+  }
+}

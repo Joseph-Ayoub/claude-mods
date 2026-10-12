@@ -13,9 +13,9 @@ A memory gauge under the Claude Code composer, and a **Memory** pane that shows 
   - totals: Used, Free, Compressed, Swap, Load, each figure flush with the pane's right edge (free disk is in the Disk pane)
   - **Sessions:** the ten biggest active Claude sessions (memory first). A session that runs mem-gauge shows model, memory, context %, running agents and minutes idle; one that does not is listed from the engine's own session record (`~/.claude/sessions/<pid>.json`) by its name with its process tree's memory and idle time (model, context and agents read `--`, and there is no Ask to wrap for it); **View all** (hotkey a) lists every active session, up to 60, and **View top 10** folds it back. This session is the bold row. A session whose heartbeat is older than 2 minutes reads `(stale)`; one whose process has exited is not listed. A Claude engine with no session record is summed on one line.
   - **Other apps:** the 10 largest non-Claude apps, helper processes rolled up under their app (Chrome's renderers count as Chrome).
-  - **Optimize:** fixed rules (the rules themselves make no AI call), each with an **Apply** button where there is one safe thing to do (confirmed first in the engine's own dialog; a tip with nothing safe to automate has no button):
+  - **Optimize:** fixed rules (the rules themselves make no AI call), one block per tip with a blank line between them: the advice first, then its button row beneath it, an **Apply** button where there is one safe thing to do (confirmed first in the engine's own dialog; a tip with nothing safe to automate has no button row). The Disk pane's "Free up safely" tips use the same shape:
     - another session idle over 30 min and over 1 GB: wrap or archive it; Apply asks it to wrap (the request file below) when it runs the mod, no button when it does not
-    - this session's context over 80 %: two buttons. **Compact** runs `/compact` on this session (confirmed first). **Hand off** writes a handoff note and moves you to a fresh session (see below). Another session's context over 80 % is advice only: compact or hand off from there.
+    - this session's context past 150k tokens (option `contextTipTokens`; 0 falls back to 80 % of the window): two buttons. **Compact** runs `/compact` on this session (confirmed first). **Hand off** runs `/handoff`, the [handoff mod](../handoff/README.md)'s command, which writes a handoff note and moves you to a fresh session (install it with `claude plugin install handoff@joseph-mods --scope user`; without it the button says so). Another session's context past the same line is advice only: compact or hand off from there. A session whose token count is not known yet (an older build's heartbeat, a fresh session) uses the 80 % rule.
     - more than 3 running agents: the largest fan-out; consider running them one after another (no button)
     - memory over 85 % used or under pressure: close the largest other app; Apply asks it to quit the normal way (`osascript`, the name passed as an argument, so it may still ask you to save; never the Claude app itself)
     - load over twice the core count: pause heavy test suites (no button)
@@ -24,20 +24,9 @@ A memory gauge under the Claude Code composer, and a **Memory** pane that shows 
 
 ### Compact or hand off?
 
-They are not the same thing.
+**Compact** summarizes the conversation in place and keeps the session; **Hand off** writes a note and starts fresh from it. What Hand off does, in order, and why nothing is lost if a step fails, is in [`mods/handoff/README.md`](../handoff/README.md): the handoff mod owns the dialog, the note, `/clear` and the pre-filled prompt. This mod only offers the button: it refuses the press while a turn is running (a toast says to wait), runs `/handoff` once per press, and dims the button, and Compact beside it, until the command has been handed over.
 
-- **Compact** keeps the same session and summarizes the conversation so far in place: the model writes a summary, the old messages are replaced by it, and you keep going. Best mid-task, when there is no natural break and the recent context matters. It loses detail: exact tool outputs and file contents are gone, only what the summary keeps.
-- **Hand off** starts fresh on purpose: a handoff note is written (goal, what is done, decisions, exact next steps, open questions, gotchas), the conversation is cleared, and the fresh conversation starts from the note. Best at a milestone (a PR merged, a phase done), when most of the context is history or failed attempts, or after many hours in one session. Every turn afterwards is cheaper and cleaner. It is only as good as the note, which is what the button automates.
-
-What **Hand off** does, in order, and why nothing is lost if a step fails:
-
-1. Asks you to confirm (Hand off or Cancel). Cancel or closing the dialog does nothing.
-2. Makes one model call: it asks this session's own model, over this session's own conversation (`$.model.fork`, served from the session's prompt cache, every tool denied, so it can only write text), for a note of at most 700 words with fixed sections, no credentials and no quotes from the transcript.
-3. Cleans the note (escape codes, control characters and invisible characters removed; cut at 20,000 characters), blanks anything shaped like a secret (API keys, AWS key ids, GitHub and Slack tokens, private key blocks, `Bearer …`, `token: …`, `password=…` become `[redacted]`), and writes it to `~/.claude/handoffs/<date-time>-<repo>-<session id start>.md` under a header naming the old session and how to resume it (`claude --resume <id>`). If the model gave no note or the file cannot be written, it says so and **nothing is cleared**.
-4. Runs `/clear`. The old conversation is not deleted; it stays resumable by its id.
-5. Puts `Continue from the handoff note at <path>: read it first, then carry on with its next step.` in the prompt box. It is **never sent for you**: read the note, edit if you like, then press Enter. If the box cannot take it, the toast tells you to paste the path.
-
-While it runs, the button reads `Writing note…` and the Compact button beside it is dim and does nothing. Notes are one file per hand-off, never inside the repository; delete them when you no longer need them.
+The tip's threshold is an absolute token count, not a share of the window, because a 1M window is capacity for reading a lot at once, not a target: per-turn cost, cache-miss cost and latency grow with the prefix and quality thins, and Anthropic's own compaction defaults to 150k.
 
 ### Ask to wrap
 
@@ -46,6 +35,14 @@ The button asks you to confirm, then leaves a small request file for that sessio
 On the receiving side, only the time and the size are read from the file (anything else in it is ignored). While a request is already showing, a newer one only updates the size, so several sessions asking at once raise one toast. A request older than 30 minutes, or stamped in the future, is dropped. Opening the pane counts as having seen it and clears the `!`.
 
 ## Install and load
+
+Install it from the marketplace (terminal session):
+
+```
+/plugin install mem-gauge --marketplace Joseph-Ayoub/claude-mods
+```
+
+or at user scope from the local marketplace (`claude plugin install mem-gauge@joseph-mods --scope user`) so every session loads it (see `mods/README.md`). The Hand off button also needs the handoff mod: `claude plugin install handoff@joseph-mods --scope user`.
 
 While developing, load it from this folder:
 
@@ -71,6 +68,7 @@ Set in the config menu, or in settings under `pluginConfigs` → `mem-gauge`:
 | --- | --- | --- |
 | `intervalSeconds` | 30 | How often the gauge re-reads memory (10 to 600). |
 | `idleMinutes` | 30 | Minutes without a turn before a session counts as idle for the wrap advice. |
+| `contextTipTokens` | 150000 | The Memory pane suggests Compact or Hand off once a session's context passes this many tokens (20000 to 1000000). 0 falls back to 80 % of the window. |
 | `statusLine` | false | Also show the one-line summary as a status line (the gauge row already carries it). |
 | `footerButtons` | true | Draw the desktop footer figures as buttons (grey chips) that open the panes; off, they are plain text and `/mem`, `/disk` open the panes. |
 | `footerCompact` | false | Both figures as fullness percents in one tight chip (`◔60% ⛁59%`) that opens the Memory pane, where **Disk** (`d`) opens the Disk pane; with `footerButtons` off, the same figures as plain text, which takes the least room. For footers that other mods' chips share: the desktop strip clips once the chips overflow it. |
@@ -80,8 +78,8 @@ Set in the config menu, or in settings under `pluginConfigs` → `mem-gauge`:
 | Hook | Why |
 | --- | --- |
 | `session.start` | registers `/mem` and `/disk`, starts the 30 s timer, takes the first reading |
-| `turn.start`, `turn.complete` (main loop only) | marks the session active; refreshes the repo · branch label after a turn |
-| `session.measure` | keeps the latest context and rate-limit figures |
+| `turn.start`, `turn.complete` (main loop only) | marks the session active (a Hand off press is refused until the turn ends); refreshes the repo · branch label after a turn |
+| `session.measure` | keeps the latest context (percent, tokens, window) and rate-limit figures |
 | `session.end` | removes this session's heartbeat file (one `rm -f`) |
 | `command.run` `/mem` | opens the pane; where no pane can be drawn (`claude -p`), answers with a short table |
 | `command.run` `/disk` | opens the Disk pane; where no pane can be drawn, answers with one line (used, total, free) |
@@ -91,15 +89,13 @@ Set in the config menu, or in settings under `pluginConfigs` → `mem-gauge`:
 
 Each tick runs, with argv only (no shell) and a 5 s timeout each, all in parallel: one `sysctl` (pressure level, swap, load; memory size and cores are read on the first call only, they never change), `vm_stat`, `df -k /` and `ps -axo pid=,ppid=,rss=,comm=`. A collector that fails leaves only its own figures blank (`--` or `?`); the rest still draws. Ticks never overlap: a slow one is joined, not doubled. Sessions share the work: whoever finds `~/.claude/mem-gauge/machine.json` older than about 25 seconds collects and writes it, the rest read it. "Used" is (active + wired + compressed) pages, the same as Activity Monitor's "Memory Used". Pressure comes from `kern.memorystatus_level` (percent free; under 20 warns, under 10 is critical).
 
-The one model call the mod makes is the **Hand off** note: `$.model.fork`, one tool-less call over this session's own conversation, served from its prompt cache, only after you confirm. Then, and only once the note is in `~/.claude/handoffs/`, it runs `/clear` (`$.command.run`) and fills the prompt box (`$.prompt.fill`), never sending it. No process runs for a hand-off.
+The mod makes no model call, writes no handoff note and never fills the prompt box. The **Hand off** button runs one command, `/handoff` (`$.command.run`), which the handoff mod answers; the note, `/clear` and the pre-filled prompt are that mod's.
 
 Files it writes, all under `~/.claude/mem-gauge/`:
 
 - `machine.json`: the shared reading (numbers and process names, no command lines)
-- `sessions/<sessionId>.json`: one heartbeat per session: label (repo · branch), working folder, model, memory, context %, rate-limit %, running agents, last activity. Never prompt text, never secrets.
+- `sessions/<sessionId>.json`: one heartbeat per session: label (repo · branch), working folder, model, memory, context % (with the token count and window), rate-limit %, running agents, last activity. Never prompt text, never secrets.
 - `requests/<sessionId>.json`: an Ask to wrap waiting to be seen; removed once seen.
-
-And one more folder, only when you press **Hand off**: `~/.claude/handoffs/<yyyy-mm-dd-HHmmss>-<repo>-<first 8 of the session id>.md` (time in UTC), the handoff note, cleaned and with secret shapes redacted. One file per hand-off, never in the repository, never removed by the mod: delete them yourself.
 
 Clean-up never depends on `session.end` (a crash or a kill skips it):
 
@@ -112,14 +108,14 @@ The prompt text of a turn is never read or stored; `turn.start` is used only as 
 
 ## Tests
 
-`claude plugin validate mods/mem-gauge` and `claude plugin test mods/mem-gauge`. The tests cover:
+`claude plugin validate mods/mem-gauge` and `claude plugin test mods/mem-gauge` (108 tests in `parse.test.ts` and `register.test.ts`). The tests cover:
 
 - pure parsing of `vm_stat`, `sysctl`, `df` and `ps` from fixtures, process trees, helper roll-up, the used % formula, pressure thresholds, glyph quintiles, every Optimize rule (and no false positives), registry status and garbage collection, torn files;
 - the tick end to end against a fake Mac (every command and file answered beneath the plugin, the clock mocked): the status line, the heartbeat, shared readings, other sessions, `/clear`;
 - the pane on terminal (text bar, no Svg) and desktop (Svg ring with alt text), plus narrow panes on all four surfaces, and the pressable gauge on the hint line (mounted and pressed on terminal and desktop);
 - `/mem` from each kind of origin, placed, unplaced and headless;
 - Ask to wrap: confirm, cancel, dismiss, the 10-minute limit, and the receiving side's toast, marker and de-duplication;
-- Compact and Hand off: this session's tip draws both buttons and another session's none; the hand-off order (confirm, note, write, `/clear`, fill, never submitted); Cancel and a dismissed dialog; nothing to fork, an API error, an empty note, a refused write and a refused `/clear` (nothing cleared before the note is on disk); a composer that will not take the fill; escape codes, bidi characters and keys cleaned and redacted on disk; the 20,000-character cut; `Writing note…` while in flight with a second press and Compact ignored; each secret shape and a false-positive guard;
+- Compact and Hand off: the tip fires at 150k tokens whatever the window, `contextTipTokens` lowers it and 0 falls back to 80 % of the window; this session's tip draws both buttons and another session's none; a Hand off press runs `/handoff` exactly once with this plugin as its origin and nothing else (no dialog, process or file of its own); without the handoff mod the toast names its install line; a running turn refuses the press with a toast; while `/handoff` is being handed over the button and Compact are dim and a second press of either is ignored, and the reverse while Compact runs (the note itself is tested in the handoff mod);
 - fail-safe paths: every process and file refused, an untrusted parent pid, a transient pid-probe failure (retried, at most five tries), the `statusLine` option off, usage unreadable (figures come from `session.measure`), the timer re-armed by the first main-loop turn after a hot reload, a denied Close press, `session.end` not waiting on its `rm`, `/mem` during a tick in flight;
 - hostile text: a heartbeat label or model, or an app name, holding newlines, escape codes or bidi characters cannot forge lines in `/mem`, the Ask to wrap question or a toast.
 

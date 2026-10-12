@@ -4,13 +4,14 @@
 
 import type { DiskReport, Snapshot } from '../types'
 
-import { formatBytes, formatMB, pressureText, shortModel } from './parse'
+import { formatBytes, formatMB, formatTokens, pressureText, shortModel } from './parse'
 
 /**
  * What a Memory pane tip's button does. Every kind confirms first and runs a
  * fixed command or an existing flow; none takes text from a process or a file
- * into a shell (there is no shell: argv only). `hand-off` writes a note with
- * one model call, then clears the conversation (register.tsx `handOff`).
+ * into a shell (there is no shell: argv only). `hand-off` runs /handoff, the
+ * handoff mod's command, whose own dialog confirms before it writes a note and
+ * clears the conversation (register.tsx `runHandoff`).
  */
 export type AdviceAction =
   | { kind: 'ask-wrap'; sessionId: string }
@@ -36,9 +37,14 @@ export type DiskAction = { kind: 'clear-caches' | 'clear-derived-data' | 'delete
 
 export type DiskAdvice = { key: string; text: string; action?: DiskAction }
 
-export type AdviceOptions = { idleMinutes: number }
+export type AdviceOptions = {
+  idleMinutes: number
+  /** The context tip fires at this many tokens; 0 falls back to CONTEXT_HIGH percent of the window. */
+  contextTokens: number
+}
 
 const IDLE_BIG_MB = 1024
+// The percent rule is the fallback for a session whose token count is unknown, or an option of 0.
 const CONTEXT_HIGH = 80
 const AGENTS_HIGH = 3
 const USED_HIGH = 85
@@ -75,8 +81,15 @@ export function advise(snapshot: Snapshot, options: AdviceOptions): Advice[] {
   }
 
   for (const s of live) {
-    if (s.contextPercent !== null && s.contextPercent > CONTEXT_HIGH) {
-      const pct = Math.round(s.contextPercent)
+    const tokens = s.contextTokens
+    const high =
+      options.contextTokens > 0 && tokens !== null
+        ? tokens >= options.contextTokens
+        : s.contextPercent !== null && s.contextPercent > CONTEXT_HIGH
+    if (high) {
+      const pct = s.contextPercent === null ? null : Math.round(s.contextPercent)
+      const ctx =
+        tokens !== null && pct !== null ? `${formatTokens(tokens)} (${pct}%)` : pct !== null ? `${pct}%` : formatTokens(tokens)
       // Only this session can be compacted or handed off from here; another's tip is advice only.
       out.push(
         s.isThis
@@ -84,9 +97,9 @@ export function advise(snapshot: Snapshot, options: AdviceOptions): Advice[] {
               key: `context:${s.sessionId}`,
               action: { kind: 'compact' },
               secondary: { kind: 'hand-off' },
-              text: `${s.label}: context ${pct}%. Compact to keep going mid-task, or hand off at a milestone (a note is written for the fresh session).`,
+              text: `${s.label}: context ${ctx}. Compact to keep going mid-task, or hand off at the next milestone (a note is written for the fresh session).`,
             }
-          : { key: `context:${s.sessionId}`, text: `${s.label}: context ${pct}%, compact or hand off from there` },
+          : { key: `context:${s.sessionId}`, text: `${s.label}: context ${ctx}, compact or hand off from there` },
       )
     }
   }

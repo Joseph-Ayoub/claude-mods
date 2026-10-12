@@ -72,7 +72,7 @@ const RETENTION_TEXT = `### 3.6 Retention
 The store **is** the record; the export is its hardcopy. Nothing is deleted except temp files
 matching \`isTmpName\`, older than one hour, one \`rm -f <absolute path>\` each, never recursive.
 Growth is bounded by the row caps (counters record drops). Back the store up off this Mac;
-Data health shows days since the last export and prompts after each closed month.
+The R&D view's Pipeline section shows days since the last export and prompts after each closed month.
 §1.6001-1(e) materiality and the 20-year §39 carryforward are the reasons.`
 
 /** The header row of every CSV, in order (SPEC §6.4). */

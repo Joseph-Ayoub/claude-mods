@@ -299,6 +299,24 @@ export type SessionRow = {
   recCount: number
 }
 
+/** One local day: net is the union-v2 seconds allocated to it, gross the span from its first to its last admitted event (0 for a one-event day). */
+export type DayFigure = { date: string; netS: number; grossS: number }
+
+/** One ISO week of the R&D view's trend; `confirmed` is null when its review file was not read (the register reads this and last week's). */
+export type WeekTrendRow = { week: string; netS: number; grossS: number; confirmed: boolean | null }
+
+/** This week's seconds per entity id, or per bucket (`__unmapped__`, `__ignored__`, `__non_rd__`) so the rows add up to the week. */
+export type EntityHours = { entity: string; seconds: number }
+
+/** This week's seconds per component (or bucket); `activity` is `mixed` when its days disagree, null for a bucket. */
+export type ComponentHours = { component: string; entity: string; activity: Activity | 'mixed' | null; seconds: number }
+
+/** This week's seconds per claim class; unmapped time is `unclassified`; `poeS` is the part with POE on. */
+export type ActivityHours = { activity: Activity | 'unclassified'; seconds: number; poeS: number }
+
+/** A day a rollup flag names, with that day's figures, for the R&D view's "Days to adjudicate". */
+export type FlaggedDay = { date: string; reason: Flag['kind']; netS: number; grossS: number }
+
 /** What the pane and the footer draw; computed by rollup.ts, never while drawing. */
 export type Rollup = {
   at: number
@@ -333,6 +351,26 @@ export type Rollup = {
   medianUsdPerHour: number | null
   /** This session's engine /cost figure (its SessionSummary.engineUsd), shown by the Session view; null until the engine reports */
   engineUsd: number | null
+  /** This week's gross span: the per-day gross figures of its dates summed */
+  weekGrossS: number
+  /** Today's gross span */
+  todayGrossS: number
+  /** Last ISO week's net seconds, for the R&D view's delta line */
+  lastWeekTotalS: number
+  /** Every ISO week from the one holding the first of last month to this week, newest first */
+  weekTrend: WeekTrendRow[]
+  /** This week by entity, largest first; buckets carry their own rows */
+  byEntity: EntityHours[]
+  /** This week by component, largest first; buckets carry their own rows */
+  byComponent: ComponentHours[]
+  /** This week by claim class, in a fixed order, zero classes included */
+  activityMix: ActivityHours[]
+  /** Days the rollup flags name (every day in scope), newest first, one row per (date, reason) */
+  flaggedDays: FlaggedDay[]
+  /** This week's three days with the most net seconds, largest first (days with time only) */
+  longestDays: DayFigure[]
+  /** The mapping's entity ids, sorted, for the Section G exemption rows */
+  entityIds: string[]
 }
 
 export type ConfirmedRow = { seconds: number; entity: string; activity: Activity; poe: boolean; source: 'pretag' | 'confirmed' }
@@ -400,6 +438,72 @@ export type CompareResult = { at: number; byDate: Record<string, number>; method
 
 export type View = 'session' | 'sessions' | 'overview' | 'review' | 'spend'
 
+/** One rate-limit window as the engine reported it; `kind` is the engine's (`five_hour`), one line. */
+export type RateLimitRow = { kind: string; percentUsed: number; resetsAt: string | null }
+
+/** The session's usage figures (SPEC §6.6): `$.session.usage()` at start and on Refresh, `session.measure` in between. */
+export type Usage = {
+  /** When the session's figures count from (ms since the epoch); null when usage could not be read */
+  startedAt: number | null
+  context: { tokens: number | null; window: number | null; percent: number | null }
+  rateLimits: RateLimitRow[]
+  /** The engine's own ledger, `cost.usd`; null before the first reading */
+  costUsd: number | null
+  /** False once a reading said the host keeps no cost ledger */
+  hasCost: boolean
+  /** When these figures were read (ms since the epoch) */
+  at: number
+}
+
+/** One row of the context breakdown, its name one line. */
+export type CategoryRow = { name: string; kind: 'used' | 'free' | 'buffer' | 'deferred'; tokens: number }
+
+/** The window by category (`$.session.usage({ breakdown: 'summary' })`), read on Usage pane open and Refresh. */
+export type Breakdown = {
+  totalTokens: number
+  rawMaxTokens: number
+  percentage: number
+  /** Null when auto-compaction is off */
+  autoCompactThreshold: number | null
+  isAutoCompactEnabled: boolean
+  model: string
+  categories: CategoryRow[]
+}
+
+/** This session's running usage totals since the mod loaded (`loadedAt`); a hot reload keeps them. */
+export type UsageTotals = {
+  loadedAt: number
+  /** The last time an accounting hook wrote (ms): the pane's "now" */
+  updatedAt: number
+  /** Main-loop turns */
+  turns: number
+  /** Subagent turns */
+  agentTurns: number
+  /** Model requests (`turn.step`) in every loop */
+  requests: number
+  /** Main-loop turn wall time */
+  activeMs: number
+  /** Every request's wall time, summed across every loop (overlaps count twice) */
+  apiMs: number
+  linesAdded: number
+  linesRemoved: number
+  edits: number
+}
+
+/** Token counts and time for one model or one loop. */
+export type UsageCounts = {
+  requests: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  apiMs: number
+  /** List-price estimate of the priced requests (USD), each at the cache TTL in force when it ran */
+  estUsd: number
+  /** Requests whose model the price table does not know (not in `estUsd`) */
+  unpriced: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'rd-ledger': {
@@ -426,6 +530,20 @@ declare module 'claude-code' {
       armToken: string | null
       /** The last Compare result for the Review view */
       compare: CompareResult | null
+      /** The Usage pane (SPEC §6.6): the engine's figures, no text field */
+      usage: Shaped<Usage | null>
+      /** The context window by category, read on Usage open and Refresh */
+      breakdown: Shaped<Breakdown | null>
+      /** This session's request, turn, time and edit counts */
+      usageTotals: Shaped<UsageTotals>
+      /** By model id (one line, ≤ 32); at most 50 keys, any more fold into `other` */
+      models: Shaped<Record<string, UsageCounts>>
+      /** The main loop, and the subagents by agent type (≤ 24); at most 50 types, the rest `other` */
+      loops: Shaped<{ main: UsageCounts; agents: Record<string, UsageCounts> }>
+      /** agentId (≤ 128) → agent type, the latest 500 ids; `$.agent.list` is read for id and type only */
+      agentTypes: Record<string, string>
+      /** A Usage Refresh is in flight: the button reads Refreshing */
+      usageRefreshing: boolean
     }
   }
 }

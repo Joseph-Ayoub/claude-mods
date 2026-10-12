@@ -66,7 +66,15 @@ export type WorldOptions = {
   tz?: string | null
   costUsd?: number | null
   usageRefused?: boolean
+  /** What `$.agent.list()` answers (default: one `builder` agent `sub-1` whose description is a sentinel-free task line). */
+  agents?: readonly { id: string; type: string; status: 'running' | 'completed'; description: string }[]
+  /** `$.agent.list()` rejects. */
+  agentListRefused?: boolean
 }
+
+/** The usage every kit model request reports: the main loop's, and a subagent's. */
+export const STEP_MAIN = { model: 'claude-opus-5-5', input_tokens: 10_000, output_tokens: 20_000, cache_read_input_tokens: 90_000, cache_creation_input_tokens: 0 }
+export const STEP_AGENT = { model: 'claude-sonnet-5-5', input_tokens: 5_000, output_tokens: 1_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 5_000 }
 
 export type Stored = { text: string; mtimeMs: number; size: number }
 
@@ -88,6 +96,12 @@ export function world(on: On, options: WorldOptions = {}) {
     logs: [] as string[],
     statuses: [] as (string | undefined)[],
     opened: [] as string[],
+    /** Every `$.ui.open` in order, with whether it asked for the keyboard. */
+    openArgs: [] as { id: string; title: string | undefined; focus: boolean }[],
+    /** `$.agent.list()` calls, model requests answered, Edit/Write/NotebookEdit calls run beneath. */
+    agentLists: 0,
+    steps: 0,
+    edits: 0,
     closed: [] as string[],
     asked: [] as string[],
     registered: [] as string[],
@@ -233,11 +247,17 @@ export function world(on: On, options: WorldOptions = {}) {
     seen.logs.push(e.text)
     return { value: undefined }
   })
+  // The panes this plugin has open, as $.ui.panes() answers them.
+  const openIds = new Set<string>()
+  on('ui.panes', () => ({ value: [...openIds].map(id => ({ id, title: id, isShown: false, isFocused: false, isPlaced: true })) }) as never)
   on('ui.open', (_$, e) => {
+    if (options.isPlaced !== false) openIds.add(e.id)
     seen.opened.push(e.id)
+    seen.openArgs.push({ id: e.id, title: e.title, focus: e.focus === true })
     return { value: options.isPlaced === false ? { isPlaced: false as const, reason: 'no surface' } : { isPlaced: true as const } }
   })
   on('ui.close', (_$, e) => {
+    if (typeof e.id === 'string') openIds.delete(e.id)
     seen.closed.push(e.id)
     return { value: undefined }
   })
@@ -252,6 +272,34 @@ export function world(on: On, options: WorldOptions = {}) {
     if (options.isDismissed) return { deny: 'dismissed' } as never
     const first = q?.options?.[0]?.label ?? ''
     return { result: { questions: e.questions, answers: { [question]: options.answer ?? first } } } as never
+  })
+  on('agent.list', () => {
+    seen.agentLists += 1
+    if (options.agentListRefused) return refuse as never
+    return { value: options.agents ?? [{ id: 'sub-1', type: 'builder', status: 'running' as const, description: 'build the thing' }] } as never
+  })
+  // The model: every request answers one stop chunk and a result with usage.
+  on('turn.step', async function* (_$, e) {
+    seen.steps += 1
+    const usage = e.agentId ? STEP_AGENT : STEP_MAIN
+    yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  // The edit tools: the first call applies a 3-added / 1-removed patch; every later one is refused.
+  on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, () => {
+    seen.edits += 1
+    if (seen.edits > 1) return { deny: 'refused by the person' } as never
+    return {
+      result: {
+        filePath: `${HOME}/shop/secret-path-a.ts`,
+        oldString: 'b',
+        newString: 'c',
+        originalFile: 'a\nb\n',
+        structuredPatch: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 4, lines: [' a', '-b', '+c', '+d', '+e'] }],
+        userModified: false,
+        replaceAll: false,
+      },
+    } as never
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.end', (_$, e) => {

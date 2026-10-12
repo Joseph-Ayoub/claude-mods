@@ -1,6 +1,6 @@
 {
   "name": "mem-gauge",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "description": "A pressable memory gauge under the composer and a /mem pane: what is using this Mac's RAM across Claude sessions, agents, models and apps, with rule-based advice.",
   "author": {
     "name": "Joseph Ayoub"
@@ -18,6 +18,12 @@
       "title": "Idle after (minutes)",
       "description": "A session with no turn for this long and over 1 GB is offered 'wrap or archive' advice and an Ask to wrap button. Default 30.",
       "default": 30
+    },
+    "contextTipTokens": {
+      "type": "number",
+      "title": "Context tip at (tokens)",
+      "description": "The Memory pane suggests Compact or Hand off once a session's context passes this many tokens (default 150000, the point where cost, latency and quality start to suffer whatever the window; 20000 to 1000000). 0 falls back to 80 % of the window.",
+      "default": 150000
     },
     "statusLine": {
       "type": "boolean",

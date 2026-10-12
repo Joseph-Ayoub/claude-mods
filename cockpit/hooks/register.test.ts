@@ -9,6 +9,8 @@ import {
   STALE_MS,
   fillOutcome,
   findRuleSentence,
+  formatTokens,
+  handoffBreak,
   hasRule,
   insertCapturedRule,
   labelMarksRecommended,
@@ -63,6 +65,24 @@ type World = {
   /** The plugin's `$.store`, in memory, and every key it was asked to read. */
   store: Map<string, unknown>
   storeReads: string[]
+  /** The commands `$.command.list()` names, from a plugin unless `commandSource` says otherwise. */
+  commands: string[]
+  commandSource: 'builtin' | 'plugin' | 'user' | 'mcp'
+  /** Every `command.run` that reached the engine beneath, with its origin. */
+  commandRuns: { command: string; args: string | undefined; origin: unknown }[]
+  /** The engine refuses the command (an unknown name: the handoff mod not installed). */
+  isCommandRunRejecting: boolean
+  /** What `$.session.usage()` answers as the session's start (/clear starts it over); MERGED_PR was merged at START. */
+  usageStartedAt: number
+  /** What `$.session.usage()` answers for the context: tokens absent until a response reported them. */
+  contextTokens: number | undefined
+  contextWindow: number
+  /** `$.session.usage()` rejects. */
+  isUsageFailing: boolean
+  /** The hook beneath the plugin's turn.complete throws. */
+  isTurnCompleteFailing: boolean
+  /** Per call, in order: how long `$.session.usage()` takes on the mocked clock (it answers as things were when called). */
+  usageDelaysMs: number[]
   clock: ReturnType<typeof mock.clock>
 }
 
@@ -148,6 +168,16 @@ function world(on: On, files: Readonly<Record<string, string>> = {}): World {
     respond: defaultRespond,
     store: new Map(),
     storeReads: [],
+    commands: [],
+    commandSource: 'plugin',
+    commandRuns: [],
+    isCommandRunRejecting: false,
+    usageStartedAt: START,
+    contextTokens: undefined,
+    contextWindow: 200_000,
+    isUsageFailing: false,
+    isTurnCompleteFailing: false,
+    usageDelaysMs: [],
     clock,
   }
 
@@ -182,6 +212,20 @@ function world(on: On, files: Readonly<Record<string, string>> = {}): World {
   })
   on('tool.list', () => ({ value: w.tools.map(name => ({ name, description: 'test', mcp: true })) }) as never)
   on('agent.list', () => ({ value: w.agents }) as never)
+  on('command.list', () => ({ value: w.commands.map(name => ({ name, description: 'test', source: w.commandSource, ...(w.commandSource === 'plugin' ? { plugin: name } : {}) })) }) as never)
+  on('command.run', ($, e) => {
+    w.commandRuns.push({ command: e.command, args: e.args, origin: e.origin })
+    if (w.isCommandRunRejecting) throw new Error(`unknown command: /${e.command}`)
+    return { text: '' }
+  })
+  on('session.usage', async () => {
+    if (w.isUsageFailing) throw new Error('usage unavailable')
+    const value = { startedAt: w.usageStartedAt, context: { window: w.contextWindow, ...(w.contextTokens === undefined ? {} : { tokens: w.contextTokens }) }, rateLimits: [] }
+    const delay = w.usageDelaysMs.shift() ?? 0
+    if (delay > 0) await clock.sleep(delay)
+    return { value } as never
+  })
+  on('session.measure', ($, e) => ({ changed: e.changed }))
   on('mcp.call', ($, e) => {
     w.mcpCalls.push({ tool: e.tool, args: e.args })
     if (e.tool === 'get_session' && w.isGetSessionFailing) return { value: { content: [{ type: 'text', text: 'session not found' }], isError: true } } as never
@@ -190,6 +234,7 @@ function world(on: On, files: Readonly<Record<string, string>> = {}): World {
   })
   on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => ({ result: { questions: e.questions, answers: { [e.questions[0]?.question ?? '']: 'Archive' } } }) as never)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('classic.Stop', () => ({}) as never)
   on('session.attach', ($, e) => ({ clientId: e.clientId }))
   on('process.run', async ($, e) => {
@@ -234,7 +279,10 @@ function world(on: On, files: Readonly<Record<string, string>> = {}): World {
     return { value: undefined }
   })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
-  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('turn.complete', ($, e) => {
+    if (w.isTurnCompleteFailing) throw new Error('a hook beneath failed')
+    return { text: e.answer }
+  })
   on('ui.render', () => ({ type: 'Text', children: [''] }))
   on('fs.stat', ($, e) => {
     const text = w.files.get(e.path)
@@ -1652,6 +1700,434 @@ describe('archive session', () => {
     ui = await $.ui.mount(band('terminal'))
     expect(await ui.find({ key: 'archive' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: 'done: ready to archive (use the app)' })).toBeDefined()
+    await ui.unmount()
+  })
+})
+
+// Hand off chip -------------------------------------------------------------------
+
+describe('hand off chip', () => {
+  const HANDOFF_MISSING = 'Cockpit: the Hand off button needs the handoff mod (claude plugin install handoff@joseph-mods --scope user).'
+  const merged = (w: World) => {
+    w.respond = argv => (argv[0] === 'git' ? gitAnswer(argv) : argv[1] === 'pr' ? ran(0, MERGED_PR) : null)
+  }
+  const measure = ($: Engine, tokens: number, window = 200_000) =>
+    $.session.measure({ context: { tokens, window, percent: Math.round((tokens / window) * 100) }, rateLimits: [], changed: ['context'] } as never)
+  /** The chip on one surface: its button and the reason beside it, or undefined for each. */
+  const chip = async ($: Engine, surface: (typeof SURFACES)[number], props: { isWorking?: boolean } = {}) => {
+    const ui = await $.ui.mount(band(surface, props))
+    const button = await ui.find({ key: 'handoff' })
+    const reason = button === undefined ? undefined : (await ui.find({ type: 'Text', text: /^(PR #\d+ merged|waiting on you, no agents running|context \S+)$/ }))?.text
+    await ui.unmount()
+    return { button, reason }
+  }
+  const STANDING = { branch: 'feat/x', pr: null, prStatus: 'none' as const, refreshedAt: 10, isClean: true, dirtyFiles: 0, headSha: HEAD_SHA, aheadOfUpstream: 0, hasRemote: true, defaultBranch: 'origin/main', inDefault: true, mergedSeenAt: 10, stopSeq: 1, stopToken: 'a', inDefaultSeenAt: 10 }
+  /** A context reading with no fill, for a session that began before the merge above was seen. */
+  const BEGAN = { tokens: null, window: null, at: 1, startedAt: 5 }
+  const PR = { number: 12, state: 'MERGED', mergeable: 'UNKNOWN', mergeState: 'UNKNOWN', ci: 'green' as const, isMerged: true, headSha: HEAD_SHA, mergedAt: 10 }
+  const IDLE = { tasks: 0, crons: 0, at: 10, seq: 1, token: 'a', source: 'agents' as const }
+
+  test('handoffBreak: merged at HEAD, waiting with no agents, context past the line; precedence; never mid-turn', () => {
+    const base = { standing: null, waiting: 0, background: null, context: BEGAN, isWorking: false, hasPending: false, tokensLine: 150_000 }
+    expect(handoffBreak(base)).toBeNull()
+    // Merged: only at this exact HEAD, a prefix either way as completion tests it, and seen merged no earlier than the session began.
+    expect(handoffBreak({ ...base, standing: { ...STANDING, pr: PR, prStatus: 'ok', mergedSeenAt: 4 } })).toBeNull()
+    expect(handoffBreak({ ...base, standing: { ...STANDING, pr: PR, prStatus: 'ok', mergedSeenAt: 5 } })?.reason).toBe('merged')
+    expect(handoffBreak({ ...base, standing: { ...STANDING, pr: PR, prStatus: 'ok', mergedSeenAt: null } })).toBeNull()
+    expect(handoffBreak({ ...base, context: null, standing: { ...STANDING, pr: PR, prStatus: 'ok' } })).toBeNull()
+    expect(handoffBreak({ ...base, context: { ...BEGAN, startedAt: null }, standing: { ...STANDING, pr: PR, prStatus: 'ok' } })).toBeNull()
+    expect(handoffBreak({ ...base, standing: { ...STANDING, pr: PR, prStatus: 'ok' } })).toEqual({ reason: 'merged', text: 'PR #12 merged' })
+    expect(handoffBreak({ ...base, standing: { ...STANDING, pr: PR, prStatus: 'ok', headSha: HEAD_SHA.slice(0, 7) } })?.reason).toBe('merged')
+    expect(handoffBreak({ ...base, standing: { ...STANDING, pr: { ...PR, headSha: HEAD_SHA.slice(0, 7) }, prStatus: 'ok' } })?.reason).toBe('merged')
+    expect(handoffBreak({ ...base, standing: { ...STANDING, pr: PR, prStatus: 'ok', headSha: 'def4567def4567def4567def4567def4567def45' } })).toBeNull()
+    expect(handoffBreak({ ...base, standing: { ...STANDING, pr: { ...PR, headSha: null }, prStatus: 'ok' } })).toBeNull()
+    expect(handoffBreak({ ...base, standing: { ...STANDING, pr: PR, prStatus: 'ok', headSha: null } })).toBeNull()
+    expect(handoffBreak({ ...base, standing: { ...STANDING, pr: { ...PR, isMerged: false, state: 'OPEN' }, prStatus: 'ok' } })).toBeNull()
+    // No PR with HEAD in the default branch is no break: a fresh session on main reads so at once.
+    expect(handoffBreak({ ...base, standing: STANDING })).toBeNull()
+    // Waiting: only with an observation of no running agents; unknown is no break.
+    expect(handoffBreak({ ...base, waiting: 1, background: IDLE })).toEqual({ reason: 'waiting', text: 'waiting on you, no agents running' })
+    expect(handoffBreak({ ...base, waiting: 1, background: { ...IDLE, tasks: 1 } })).toBeNull()
+    expect(handoffBreak({ ...base, waiting: 1, background: null })).toBeNull()
+    expect(handoffBreak({ ...base, waiting: 0, background: IDLE })).toBeNull()
+    // Context: absolute tokens; 0 means 80 % of the window, and no window then no line.
+    expect(handoffBreak({ ...base, context: { ...BEGAN, tokens: 150_000, window: 1_000_000 } })).toEqual({ reason: 'context', text: 'context 150k' })
+    expect(handoffBreak({ ...base, context: { ...BEGAN, tokens: 149_999, window: 1_000_000 } })).toBeNull()
+    expect(handoffBreak({ ...base, context: { ...BEGAN, tokens: null, window: 200_000 } })).toBeNull()
+    expect(handoffBreak({ ...base, tokensLine: 0, context: { ...BEGAN, tokens: 160_000, window: 200_000 } })?.text).toBe('context 160k')
+    expect(handoffBreak({ ...base, tokensLine: 0, context: { ...BEGAN, tokens: 159_999, window: 200_000 } })).toBeNull()
+    expect(handoffBreak({ ...base, tokensLine: 0, context: { ...BEGAN, tokens: 900_000, window: null } })).toBeNull()
+    // The context break needs no session start: a session whose usage never answered still counts tokens it measured.
+    expect(handoffBreak({ ...base, context: { ...BEGAN, tokens: 150_000, window: null, startedAt: null } })?.reason).toBe('context')
+    // Precedence: merged, then waiting, then context; one reason only.
+    const all = { ...base, standing: { ...STANDING, pr: PR, prStatus: 'ok' as const }, waiting: 2, background: IDLE, context: { ...BEGAN, tokens: 400_000, window: 1_000_000 } }
+    expect(handoffBreak(all)?.reason).toBe('merged')
+    expect(handoffBreak({ ...all, standing: null })?.reason).toBe('waiting')
+    expect(handoffBreak({ ...all, standing: null, waiting: 0 })?.reason).toBe('context')
+    // Never mid-turn or with a reply queued.
+    expect(handoffBreak({ ...all, isWorking: true })).toBeNull()
+    expect(handoffBreak({ ...all, hasPending: true })).toBeNull()
+    expect([formatTokens(950), formatTokens(162_400), formatTokens(999_499), formatTokens(999_500), formatTokens(1_250_000)]).toEqual(['950', '162k', '999k', '1M', '1.3M'])
+  })
+
+  test('a merged PR at HEAD with /handoff listed: Hand off with its reason on both surfaces, no hotkey; a press runs /handoff once as the cockpit', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    for (const surface of SURFACES) {
+      const { button, reason } = await chip($, surface)
+      expect(button?.props['label']).toBe('Hand off')
+      expect(button?.props['hotkey']).toBeUndefined()
+      // Never dimmed: the chip is not drawn while working.
+      expect(button?.props['dimColor']).toBeUndefined()
+      expect(reason).toBe('PR #12 merged')
+    }
+    const ui = await $.ui.mount(band('terminal'))
+    await ui.press({ key: 'handoff' })
+    await w.clock.settle()
+    expect(w.commandRuns).toHaveLength(1)
+    expect(w.commandRuns[0]?.command).toBe('handoff')
+    expect(w.commandRuns[0]?.args ?? '').toBe('')
+    expect(w.commandRuns[0]?.origin).toMatchObject({ kind: 'plugin', name: 'cockpit' })
+    expect(w.toasts).toEqual([])
+    await ui.unmount()
+  })
+
+  test('a PR merged before this session began is not a break: a fresh lead on a merged branch is not offered a hand-off at once', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    w.usageStartedAt = START + 60_000
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+    // The other breaks still stand in that session.
+    await $.turn.start({ ...composer('go on'), turnId: 'turn-9' })
+    await $.turn.complete(answer('Built.\n\nWAITING ON JOSEPH: click Approve in the console', { turnId: 'turn-9' }))
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('waiting on you, no agents running')
+  })
+
+  test('nothing is drawn without the handoff mod: no command, or only a user command of that name', async ($, on) => {
+    const w = world(on)
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+    w.commands = ['handoff']
+    w.commandSource = 'user'
+    await w.clock.advance(60_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+    // Installed later: the next main-loop turn re-reads the command list.
+    w.commandSource = 'plugin'
+    await $.turn.complete(answer('Merged.'))
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('PR #12 merged')
+    // Removed again: the next refresh takes the chip away.
+    w.commands = []
+    await w.clock.advance(60_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+  })
+
+  test('a WAITING ON JOSEPH answer with no agents running is a break; one running agent is not', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    await $.turn.start({ ...composer('go on'), turnId: 'turn-2' })
+    await $.turn.complete(answer('Built and verified.\n\nWAITING ON JOSEPH: paste the token in the console, the deploy needs it', { turnId: 'turn-2' }))
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('waiting on you, no agents running')
+
+    w.agents = [{ id: 'a1', description: 'scout', type: 'scout', status: 'running' }]
+    await $.turn.start({ ...composer('and the rest?'), turnId: 'turn-3' })
+    await $.turn.complete(answer('Dispatched.\n\nWAITING ON JOSEPH: paste the token in the console, the deploy needs it', { turnId: 'turn-3' }))
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+  })
+
+  test('context: drawn at 150k tokens by session.measure, not at 149k; a main-loop turn end reads the usage too', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    await measure($, 149_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+    await measure($, 150_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('context 150k')
+    w.contextTokens = 171_200
+    await $.turn.complete(answer('Done with that step.'))
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('context 171k')
+  })
+
+  /** A /clear as the engine raises it: session.end with reason clear, the process going on under a new id. */
+  const clear = ($: Engine, reason: 'clear' | 'resume' = 'clear') => $.session.end({ reason, sessionId: 'session-1', resume: { id: 'session-2' } } as never)
+  /** A PR merged `afterMs` after START, so a conversation that began between START and the merge still sees a break. */
+  const mergedLater = (w: World, afterMs: number) => {
+    const pr = JSON.stringify({ ...JSON.parse(MERGED_PR), mergedAt: new Date(START + afterMs).toISOString() })
+    w.respond = argv => (argv[0] === 'git' ? gitAnswer(argv) : argv[1] === 'pr' ? ran(0, pr) : null)
+  }
+  /** The band on one surface: whether the old conversation's waiting list and decision cards are drawn. */
+  const leftovers = async ($: Engine, surface: (typeof SURFACES)[number]) => {
+    const ui = await $.ui.mount(band(surface))
+    const found = { waiting: (await ui.find({ key: 'fold-waiting' })) !== undefined, cards: (await ui.find({ key: 'fold-cards' })) !== undefined }
+    await ui.unmount()
+    return found
+  }
+  const WAITING_ANSWER = `${DECISIONS}\n\nWAITING ON JOSEPH: paste the token in the console, the deploy needs it`
+
+  test('a /clear (session.end, reason clear) takes every break away at once, before any turn; each comes back only on the new conversation\'s own evidence', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    await $.turn.start({ ...composer('go on'), turnId: 'turn-2' })
+    await $.turn.complete(answer(WAITING_ANSWER, { turnId: 'turn-2' }))
+    await measure($, 180_000)
+    await w.clock.settle()
+    // All three breaks stand (merged leads); the waiting list and the cards are drawn.
+    expect((await chip($, 'terminal')).reason).toBe('PR #12 merged')
+    expect(await leftovers($, 'terminal')).toEqual({ waiting: true, cards: true })
+
+    // The new conversation began a minute after the merge, with a small fill.
+    w.usageStartedAt = START + 60_000
+    w.contextTokens = 20_000
+    await clear($)
+    // Before the zero-delay read and before any turn: nothing of the old conversation is drawn,
+    // and the agent observation is unknown again (archive readiness fails closed).
+    for (const surface of SURFACES) {
+      expect((await chip($, surface)).button).toBeUndefined()
+      expect(await leftovers($, surface)).toEqual({ waiting: false, cards: false })
+    }
+    {
+      // The archive check reads the forgotten observation as unknown: the blockers line says so.
+      const ui = await $.ui.mount(band('terminal'))
+      expect(await ui.find({ type: 'Text', text: /background work unknown/ })).toBeDefined()
+      await ui.unmount()
+    }
+    // The read lands: a merge from before this conversation is no break, and 20k is under the line.
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+
+    // Context: back on a measurement past the line.
+    await measure($, 160_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('context 160k')
+    // Waiting: back on a new WAITING answer (it leads the context break).
+    await $.turn.start({ ...composer('and now?'), turnId: 'turn-3' })
+    await $.turn.complete(answer('Done.\n\nWAITING ON JOSEPH: click Approve in the console', { turnId: 'turn-3' }))
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('waiting on you, no agents running')
+  })
+
+  test('after a /clear the merged break comes back only when the new start is not later than the merge', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    // Merged five seconds after START: both the old conversation (began at START) and the new one (a second later) see it.
+    mergedLater(w, 5_000)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    expect((await chip($, 'terminal')).reason).toBe('PR #12 merged')
+    w.usageStartedAt = START + 1_000
+    await clear($)
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('PR #12 merged')
+  })
+
+  test('a usage read after a /clear that still reports the forgotten start is dropped; the next start is taken', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    expect((await chip($, 'terminal')).reason).toBe('PR #12 merged')
+    // The engine has not moved on yet when the zero-delay read lands: it answers the old start.
+    await clear($)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+    // The next read carries the new start (after the merge): still no merged break, and reads are taken again.
+    w.usageStartedAt = START + 5
+    w.contextTokens = 171_200
+    await $.turn.complete(answer('Done with that step.'))
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('context 171k')
+  })
+
+  test('a resume that swaps the conversation (session.end, reason resume) forgets it like a /clear', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    await $.turn.start({ ...composer('go on'), turnId: 'turn-2' })
+    await $.turn.complete(answer(WAITING_ANSWER, { turnId: 'turn-2' }))
+    await w.clock.settle()
+    expect(await leftovers($, 'terminal')).toEqual({ waiting: true, cards: true })
+    w.usageStartedAt = START + 60_000
+    await clear($, 'resume')
+    for (const surface of SURFACES) {
+      expect((await chip($, surface)).button).toBeUndefined()
+      expect(await leftovers($, surface)).toEqual({ waiting: false, cards: false })
+    }
+  })
+
+  test('usage failing right after a /clear: no merged chip (the start stays unknown) until a read succeeds', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    // Merged five seconds after START, so the new conversation (a second after START) still sees the break once its start is read.
+    mergedLater(w, 5_000)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    expect((await chip($, 'terminal')).reason).toBe('PR #12 merged')
+    w.isUsageFailing = true
+    await clear($)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+    // A main-loop turn end reads again and fails again: still nothing, and a measurement brings no start.
+    await $.turn.complete(answer('Merged.'))
+    await measure($, 40_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+    // The read recovers: the new conversation's start is known again.
+    w.isUsageFailing = false
+    w.usageStartedAt = START + 1_000
+    await $.turn.complete(answer('Merged.'))
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('PR #12 merged')
+  })
+
+  test('a usage read begun before a /clear and answered after it is dropped: the old fill and start never come back', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    // A turn end asks for the usage while the old conversation stands (180k, started at START); the answer takes 10 s.
+    w.contextTokens = 180_000
+    w.usageDelaysMs = [10_000]
+    await $.turn.complete(answer('Merged.'))
+    // The clear lands meanwhile; the new conversation began later, with a small fill, and its read is quick.
+    w.usageStartedAt = START + 60_000
+    w.contextTokens = 20_000
+    await clear($)
+    await w.clock.settle()
+    await w.clock.advance(10_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+  })
+
+  test('a hook beneath turn.complete that throws does not leave the turn live: Hand off still runs', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    w.isTurnCompleteFailing = true
+    await $.turn.start({ ...composer('go on'), turnId: 'turn-5' })
+    expect(await $.turn.complete(answer('Done.', { turnId: 'turn-5' })).then(() => 'answered', () => 'rejected')).toBe('rejected')
+    await w.clock.settle()
+    const ui = await $.ui.mount(band('terminal'))
+    await ui.press({ key: 'handoff' })
+    await w.clock.settle()
+    expect(w.commandRuns.map(r => r.command)).toEqual(['handoff'])
+    expect(w.toasts).toEqual([])
+    await ui.unmount()
+  })
+
+  test('handoffTokens 0 falls back to 80 % of the window', { options: { handoffTokens: 0 } }, async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    await measure($, 159_000, 200_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+    await measure($, 160_000, 200_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('context 160k')
+  })
+
+  test('handoffTokens 50000 lowers the line', { options: { handoffTokens: 50_000 } }, async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    await measure($, 49_000, 1_000_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).button).toBeUndefined()
+    await measure($, 50_000, 1_000_000)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface)).reason).toBe('context 50k')
+  })
+
+  test('handoffTokens below the floor is held to 20k', { options: { handoffTokens: 5 } }, async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    await measure($, 19_000)
+    await w.clock.settle()
+    expect((await chip($, 'terminal')).button).toBeUndefined()
+    await measure($, 20_000)
+    await w.clock.settle()
+    expect((await chip($, 'terminal')).reason).toBe('context 20k')
+  })
+
+  test('while working the chip is not offered, and a press that lands after a turn started runs nothing but says so', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    for (const surface of SURFACES) expect((await chip($, surface, { isWorking: true })).button).toBeUndefined()
+    // The drawing predates the turn: the press re-checks and refuses.
+    const ui = await $.ui.mount(band('terminal'))
+    expect((await ui.find({ key: 'handoff' }))?.props['label']).toBe('Hand off')
+    await $.turn.start({ ...composer('one more thing'), turnId: 'turn-4' })
+    await ui.press({ key: 'handoff' })
+    await w.clock.settle()
+    expect(w.commandRuns).toEqual([])
+    expect(w.toasts).toEqual(['Cockpit: wait for the turn to end, then hand off.'])
+    await ui.unmount()
+  })
+
+  test('a refused run (the handoff mod gone) toasts the install line', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    w.isCommandRunRejecting = true
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    const ui = await $.ui.mount(band('desktop'))
+    await ui.press({ key: 'handoff' })
+    await w.clock.settle()
+    expect(w.commandRuns.map(r => r.command)).toEqual(['handoff'])
+    expect(w.toasts).toEqual([HANDOFF_MISSING])
+    await ui.unmount()
+  })
+
+  test('the Standing fold hides the chip, and unfolding brings it back', async ($, on) => {
+    const w = world(on)
+    w.commands = ['handoff']
+    merged(w)
+    await $.session.start(SESSION)
+    await w.clock.settle()
+    const ui = await $.ui.mount(band('terminal'))
+    expect(await ui.find({ key: 'handoff' })).toBeDefined()
+    await ui.press({ key: 'fold-standing' })
+    expect(await ui.find({ key: 'handoff' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'PR #12 merged' })).toBeUndefined()
+    await ui.press({ key: 'fold-standing' })
+    expect(await ui.find({ key: 'handoff' })).toBeDefined()
     await ui.unmount()
   })
 })

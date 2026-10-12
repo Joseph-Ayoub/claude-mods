@@ -36,18 +36,13 @@ type WorldOptions = {
   isCloseDenied?: boolean
   /** This session's context fill as $.session.usage reads it (42 by default). */
   contextPercent?: number
-  /** What $.model.fork answers; a note with the six sections by default. */
-  fork?: Record<string, unknown>
-  /** While set, the fork waits on it: a hand-off held in flight. */
-  forkHold?: Promise<void>
-  /** fs.write under ~/.claude/handoffs/ is refused (the other writes go through). */
-  isHandoffWriteRefused?: boolean
-  /** The /clear the plugin runs is rejected. */
-  isClearRefused?: boolean
-  /** How the prompt box answers $.prompt.fill: filled, refused (a dialog holds the keys), or the call throws. */
-  fill?: 'filled' | 'refused' | 'throws'
-  /** What the prompt box holds when $.prompt.read is asked (a draft the person typed); empty by default. */
-  draft?: string
+  /** The token count and window beside it; absent by default, as on a fresh session. */
+  contextTokens?: number
+  contextWindow?: number
+  /** No plugin answers /handoff: the engine rejects the name, as when the handoff mod is not installed. */
+  isHandoffMissing?: boolean
+  /** While set, /handoff waits on it: a hand-off held in flight. */
+  handoffHold?: Promise<void>
   /** While set, the /compact the plugin runs waits on it: a compact held in flight. */
   compactHold?: Promise<void>
   /** The session's root and working folder (the label's repo part is its basename). */
@@ -55,8 +50,6 @@ type WorldOptions = {
   /** HOME as the environment gives it. */
   home?: string
 }
-
-const NOTE = '## Goal\nShip mem-gauge 0.2.0.\n\n## Next steps\n1. Run the tests.'
 
 /**
  * Everything beneath the plugin: a clock, HOME, an in-memory file system, the
@@ -81,16 +74,10 @@ function world(on: On, options: WorldOptions = {}) {
     order: [] as string[],
     /** While set, vm_stat waits on it: a tick held in flight. */
     hold: null as Promise<void> | null,
-    /** The prompts $.model.fork was asked. */
-    forks: [] as string[],
     /** The slash commands the plugin ran. */
     commands: [] as string[],
-    /** What $.prompt.fill was asked to put in the box. */
-    fills: [] as string[],
-    /** The mode of each $.prompt.fill: replace, or append under a draft. */
-    fillModes: [] as string[],
-    /** The hand-off's steps beneath, in order: fork, write (a handoff note), clear, fill. */
-    steps: [] as string[],
+    /** Each /handoff run: its args and the origin the engine stamped on it. */
+    handoffs: [] as { args: string; origin: unknown }[],
   }
   let shCalls = 0
   mock.env(on, { HOME: options.home ?? HOME })
@@ -103,10 +90,6 @@ function world(on: On, options: WorldOptions = {}) {
   })
   on('fs.write', (_$, e) => {
     if (options.isLockedDown) return refuse
-    if (e.path.startsWith(`${HOME}/.claude/handoffs/`)) {
-      if (options.isHandoffWriteRefused) return refuse
-      seen.steps.push('write')
-    }
     files.set(e.path, { text: e.text, mtimeMs: seen.clock.now() })
     return { value: undefined }
   })
@@ -161,7 +144,7 @@ function world(on: On, options: WorldOptions = {}) {
   on('session.root', () => ({ value: options.root ?? '/work/claude-skills-lab' }))
   on('session.model', () => ({ value: 'claude-fable-5-1' }))
   on('session.usage', () => (options.isUsageRefused ? refuse : {
-    value: { startedAt: T0 - 60_000, context: { window: 200_000, percent: options.contextPercent ?? 42 }, rateLimits: [{ kind: 'five_hour', percentUsed: 30 }] },
+    value: { startedAt: T0 - 60_000, context: { window: options.contextWindow ?? 200_000, percent: options.contextPercent ?? 42, ...(options.contextTokens === undefined ? {} : { tokens: options.contextTokens }) }, rateLimits: [{ kind: 'five_hour', percentUsed: 30 }] },
   }) as never)
   on('agent.list', () => ({
     value: [
@@ -197,28 +180,18 @@ function world(on: On, options: WorldOptions = {}) {
     if (options.isDismissed) return { deny: 'dismissed' } as never
     return { result: { questions: e.questions, answers: { [question]: options.answer ?? 'Ask to wrap' } } } as never
   })
-  on('model.fork', async (_$, e) => {
-    seen.forks.push(e.prompt)
-    seen.steps.push('fork')
-    if (options.forkHold) await options.forkHold
-    return { value: (options.fork ?? { isAnswered: true, text: NOTE, usage: { input_tokens: 10, output_tokens: 20 } }) as never }
+  on('command.run', { command: 'compact' }, async (_$, e) => {
+    seen.commands.push(e.command)
+    if (options.compactHold) await options.compactHold
+    return {}
   })
-  for (const command of ['clear', 'compact']) {
-    on('command.run', { command }, async (_$, e) => {
-      seen.commands.push(e.command)
-      seen.steps.push(e.command)
-      if (e.command === 'clear' && options.isClearRefused) throw new Error('refused in this test')
-      if (e.command === 'compact' && options.compactHold) await options.compactHold
-      return {}
-    })
-  }
-  on('prompt.read', () => ({ value: { text: options.draft ?? '', cursor: 0 } }) as never)
-  on('prompt.fill', (_$, e) => {
-    seen.fills.push(e.text)
-    seen.fillModes.push(e.mode ?? 'replace')
-    seen.steps.push('fill')
-    if (options.fill === 'throws') throw new Error('refused in this test')
-    return options.fill === 'refused' ? { isFilled: false, refusal: 'dialog' as const } : { isFilled: true }
+  // The handoff mod's command, as this mod sees it: answered at once (its flow runs on its own timer), or unknown.
+  on('command.run', { command: 'handoff' }, async (_$, e) => {
+    seen.commands.push(e.command)
+    seen.handoffs.push({ args: e.args, origin: e.origin })
+    if (options.isHandoffMissing) throw new Error('unknown command: handoff')
+    if (options.handoffHold) await options.handoffHold
+    return { text: 'handoff: confirm in the dialog.' }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.end', (_$, e) => {
@@ -301,6 +274,8 @@ describe('the tick', () => {
     expect(lastStatus(seen)).toBe('Memory 38% · Pressure ✓ · 1 session · Disk 927.3 GB free')
 
     const entry = JSON.parse(seen.files.get(`${DIR}/sessions/${THIS}.json`)?.text ?? '{}')
+    // No token count yet (a fresh session): the window is known, the count is null.
+    expect(entry).toMatchObject({ contextTokens: null, contextWindow: 200_000 })
     expect(entry).toMatchObject({
       sessionId: THIS,
       pid: 100,
@@ -924,8 +899,24 @@ describe('activity and the timer', () => {
     await seen.clock.settle()
     expect(entryOf(seen)).toMatchObject({ contextPercent: 91, rateLimitPercent: 55 })
     const pane = await $.ui.mount({ plugin: 'mem-gauge', surface: 'terminal', ...PANE })
-    expect(await pane.find({ type: 'Text', text: /context 91%\. Compact to keep going mid-task, or hand off at a milestone/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /context 91%\. Compact to keep going mid-task, or hand off at the next milestone/ })).toBeDefined()
     await pane.unmount()
+  })
+
+  test('session.measure carries the token count and window into the heartbeat when usage cannot be read', async ($, on) => {
+    const seen = world(on, { isUsageRefused: true })
+    await start($, seen)
+    expect(entryOf(seen)).toMatchObject({ contextTokens: null, contextWindow: null })
+    await $.session.measure({ context: { tokens: 160_000, window: 1_000_000, percent: 16 }, rateLimits: [], changed: ['context'] } as never)
+    await seen.clock.advance(30_000)
+    await seen.clock.settle()
+    expect(entryOf(seen)).toMatchObject({ contextPercent: 16, contextTokens: 160_000, contextWindow: 1_000_000 })
+  })
+
+  test('this session\'s heartbeat carries the usage figures: tokens and window', async ($, on) => {
+    const seen = world(on, { contextTokens: 160_000, contextWindow: 1_000_000, contextPercent: 16 })
+    await start($, seen)
+    expect(entryOf(seen)).toMatchObject({ contextPercent: 16, contextTokens: 160_000, contextWindow: 1_000_000 })
   })
 
   test('memory size and cores are read once; later ticks ask sysctl for the changing names only', { options: { statusLine: true } }, async ($, on) => {
@@ -1223,24 +1214,55 @@ describe('one footer chip (footerCompact)', () => {
 
 describe('the context tip: Compact and Hand off', () => {
   const TIP = `context:${THIS}`
-  const HANDOFFS = `${HOME}/.claude/handoffs/`
-  const NOTE_PATH = `${HANDOFFS}2027-01-15-080000-claude-skills-lab-11111111.md`
-  const QUESTION =
-    'A handoff note is written from this conversation, the conversation is cleared (the old one stays resumable by its id), and the next prompt is pre-filled to continue from the note. Hand off to a fresh session?'
-  const notes = (seen: World) => [...seen.files.keys()].filter(path => path.startsWith(HANDOFFS))
-  const answered = (text: string) => ({ isAnswered: true, text, usage: { input_tokens: 1, output_tokens: 1 } })
 
   async function mountPane($: Engine, seen: World) {
     await start($, seen)
     return $.ui.mount({ plugin: 'mem-gauge', surface: 'terminal', ...PANE })
   }
 
+  test('a 1M window at 160k tokens (16 %) draws the tip with both buttons and the token text', async ($, on) => {
+    const seen = world(on, { contextPercent: 16, contextTokens: 160_000, contextWindow: 1_000_000 })
+    const pane = await mountPane($, seen)
+    expect((await pane.find({ key: `apply:${TIP}` }))?.props['label']).toBe('Compact')
+    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['label']).toBe('Hand off')
+    expect(await pane.find({ type: 'Text', text: /context 160k \(16%\)\. Compact to keep going mid-task, or hand off at the next milestone \(a note is written for the fresh session\)\./ })).toBeDefined()
+    await pane.unmount()
+  })
+
+  test('149k tokens on a 1M window stays quiet', async ($, on) => {
+    const quiet = world(on, { contextPercent: 15, contextTokens: 149_000, contextWindow: 1_000_000 })
+    const pane = await mountPane($, quiet)
+    expect(await pane.find({ key: `apply:${TIP}` })).toBeUndefined()
+    await pane.unmount()
+  })
+
+  test('contextTipTokens lowers the line', { options: { contextTipTokens: 50_000 } }, async ($, on) => {
+    const seen = world(on, { contextPercent: 6, contextTokens: 60_000, contextWindow: 1_000_000 })
+    const pane = await mountPane($, seen)
+    expect(await pane.find({ type: 'Text', text: /context 60k \(6%\)\./ })).toBeDefined()
+    await pane.unmount()
+  })
+
+  test('contextTipTokens 0 falls back to 80 % of the window', { options: { contextTipTokens: 0 } }, async ($, on) => {
+    const seen = world(on, { contextPercent: 40, contextTokens: 400_000, contextWindow: 1_000_000 })
+    const pane = await mountPane($, seen)
+    expect(await pane.find({ key: `apply:${TIP}` })).toBeUndefined()
+    await pane.unmount()
+  })
+
+  test('contextTipTokens 0 still fires past 80 %', { options: { contextTipTokens: 0 } }, async ($, on) => {
+    const seen = world(on, { contextPercent: 91, contextTokens: 910_000, contextWindow: 1_000_000 })
+    const pane = await mountPane($, seen)
+    expect(await pane.find({ type: 'Text', text: /context 910k \(91%\)\./ })).toBeDefined()
+    await pane.unmount()
+  })
+
   test('this session draws Compact and Hand off; another session\'s tip has no button', async ($, on) => {
     const seen = world(on, { contextPercent: 91, files: { [`${DIR}/sessions/${OTHER}.json`]: otherEntry({ contextPercent: 90 }) } })
     const pane = await mountPane($, seen)
     expect((await pane.find({ key: `apply:${TIP}` }))?.props['label']).toBe('Compact')
     expect((await pane.find({ key: `handoff:${TIP}` }))?.props['label']).toBe('Hand off')
-    expect(await pane.find({ type: 'Text', text: /context 91%\. Compact to keep going mid-task, or hand off at a milestone \(a note is written for the fresh session\)\./ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /context 91%\. Compact to keep going mid-task, or hand off at the next milestone \(a note is written for the fresh session\)\./ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: 'shop · feat/cart: context 90%, compact or hand off from there' })).toBeDefined()
     expect(await pane.find({ key: `apply:context:${OTHER}` })).toBeUndefined()
     expect(await pane.find({ key: `handoff:context:${OTHER}` })).toBeUndefined()
@@ -1249,140 +1271,34 @@ describe('the context tip: Compact and Hand off', () => {
     await pane.unmount()
   })
 
-  test('Hand off: confirm, fork, note on disk, then /clear, then the composer is filled; nothing is submitted', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off' })
+  test('Hand off runs /handoff once, from this plugin, and does nothing else itself', async ($, on) => {
+    const seen = world(on, { contextPercent: 91 })
     const pane = await mountPane($, seen)
     const ran = seen.argv.length
+    const before = new Set(seen.files.keys())
     await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.asked).toEqual([QUESTION])
-    expect(seen.forks).toHaveLength(1)
-    expect(seen.forks[0]).toContain('Never include credentials, tokens, keys, passwords, account numbers or personal data')
-    // The note is on disk before anything is cleared.
-    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
-    expect(notes(seen)).toEqual([NOTE_PATH])
-    const text = seen.files.get(NOTE_PATH)?.text ?? ''
-    expect(text).toMatch(/^# Handoff — claude-skills-lab · [^\n]+ — 2027-01-15T08:00:00\.000Z\n/)
-    expect(text).toContain(`From session ${THIS}; the old conversation stays resumable: claude --resume ${THIS}\n\n## Goal\nShip mem-gauge 0.2.0.`)
-    expect(seen.commands).toEqual(['clear'])
-    expect(seen.fills).toEqual([`Continue from the handoff note at ${NOTE_PATH}: read it first, then carry on with its next step.`])
-    expect(seen.toasts[seen.toasts.length - 1]).toBe(`Memory: handoff note at ${NOTE_PATH}; the conversation was cleared.`)
-    // No process ran, and the button is free again.
+    expect(seen.handoffs).toEqual([{ args: '', origin: { kind: 'plugin', name: 'mem-gauge' } }])
+    expect(seen.commands).toEqual(['handoff'])
+    // The dialog, the note, /clear and the fill are the handoff mod's: none of them happen here.
+    expect(seen.asked).toEqual([])
     expect(seen.argv.slice(ran)).toEqual([])
-    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['label']).toBe('Hand off')
+    expect([...seen.files.keys()].filter(path => !before.has(path) && !path.startsWith(`${DIR}/`))).toEqual([])
+    expect(seen.toasts.filter(t => t.includes('handoff'))).toEqual([])
+    // The button is free again.
+    const handoff = await pane.find({ key: `handoff:${TIP}` })
+    expect([handoff?.props['label'], handoff?.props['dimColor']]).toEqual(['Hand off', false])
     await pane.unmount()
   })
 
-  test('a composer that refuses the fill: the clear stands and the toast says to paste the path', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fill: 'refused' })
+  test('without the handoff mod the press toasts its install line and the button is free again', async ($, on) => {
+    const seen = world(on, { contextPercent: 91, isHandoffMissing: true })
     const pane = await mountPane($, seen)
     await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
-    expect(seen.toasts[seen.toasts.length - 1]).toBe(`Memory: handoff note at ${NOTE_PATH}; the conversation was cleared. Paste that path into the next prompt.`)
-    await pane.unmount()
-  })
-
-  test('a fill that throws is caught the same way', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fill: 'throws' })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
-    expect(seen.toasts[seen.toasts.length - 1]).toBe(`Memory: handoff note at ${NOTE_PATH}; the conversation was cleared. Paste that path into the next prompt.`)
-    await pane.unmount()
-  })
-
-  test('Cancel does nothing', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Cancel' })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.asked).toHaveLength(1)
-    expect(seen.steps).toEqual([])
-    expect(notes(seen)).toEqual([])
-    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['label']).toBe('Hand off')
-    await pane.unmount()
-  })
-
-  test('a dismissed dialog does nothing', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, isDismissed: true })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.asked).toHaveLength(1)
-    expect(seen.steps).toEqual([])
-    expect(notes(seen)).toEqual([])
-    await pane.unmount()
-  })
-
-  test('nothing to fork yet: a toast, no note, nothing cleared', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fork: { isAnswered: false, reason: 'nothing-to-fork' } })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: nothing to hand off yet.')
-    expect(seen.steps).toEqual(['fork'])
-    expect(notes(seen)).toEqual([])
-    await pane.unmount()
-  })
-
-  test('an API error: a toast with the status, no note, nothing cleared', async ($, on) => {
-    const usage = { input_tokens: 0, output_tokens: 0 }
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fork: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage } })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: the handoff note could not be written (api-error 529).')
-    expect(seen.steps).toEqual(['fork'])
-    expect(notes(seen)).toEqual([])
-    await pane.unmount()
-  })
-
-  test('a reply with no text once cleaned: a toast, no note, nothing cleared', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fork: answered(' \u001b[0m\n\n') })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: the handoff note could not be written (empty-reply).')
-    expect(seen.steps).toEqual(['fork'])
-    await pane.unmount()
-  })
-
-  test('the note cannot be written: a toast, nothing cleared', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', isHandoffWriteRefused: true })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.toasts[seen.toasts.length - 1]).toMatch(/^Memory: could not write the handoff note \([^)]+\); nothing was cleared\.$/)
-    expect(seen.steps).toEqual(['fork'])
-    expect(seen.commands).toEqual([])
-    expect(notes(seen)).toEqual([])
-    await pane.unmount()
-  })
-
-  test('/clear refused: the note stays, the toast names it, the composer is not filled', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', isClearRefused: true })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.steps).toEqual(['fork', 'write', 'clear'])
-    expect(notes(seen)).toEqual([NOTE_PATH])
-    expect(seen.fills).toEqual([])
-    expect(seen.toasts[seen.toasts.length - 1]).toBe(`Memory: note written at ${NOTE_PATH}; run /clear yourself when ready.`)
-    await pane.unmount()
-  })
-
-  test('hostile note text is cleaned and redacted on disk', async ($, on) => {
-    const hostile = '## Goal\n\u001b[31mred\u001b[0m \u001b]0;pwned\u0007ok\nBIDI_OVERRIDEevilZERO_WIDTH text\nkey sk-ant-api03-abcdefgh12345678 and AKIAABCDEFGHIJKLMNOP\n'
-      .replace('BIDI_OVERRIDE', String.fromCodePoint(0x202e))
-      .replace('ZERO_WIDTH', String.fromCodePoint(0x200b))
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fork: answered(hostile) })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    const text = seen.files.get(NOTE_PATH)?.text ?? ''
-    expect(text).toContain('## Goal\nred ok\nevil text\nkey [redacted] and [redacted]\n')
-    for (const bad of ['\u001b', '\u0007', String.fromCodePoint(0x202e), String.fromCodePoint(0x200b), 'sk-ant', 'AKIA']) expect(text).not.toContain(bad)
-    await pane.unmount()
-  })
-
-  test('a 30,000-character note is cut with the marker', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', fork: answered('x'.repeat(30_000)) })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    const text = seen.files.get(NOTE_PATH)?.text ?? ''
-    expect(text.endsWith('\n… (cut)\n')).toBe(true)
-    expect(text.split('\n\n')[1]).toBe(`${'x'.repeat(20_000)}\n… (cut)\n`)
+    expect(seen.handoffs).toHaveLength(1)
+    expect(seen.toasts[seen.toasts.length - 1]).toBe(
+      'Memory: the Hand off button needs the handoff mod (claude plugin install handoff@joseph-mods --scope user).',
+    )
+    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['dimColor']).toBe(false)
     await pane.unmount()
   })
 
@@ -1392,36 +1308,34 @@ describe('the context tip: Compact and Hand off', () => {
     await pane.press({ key: `apply:${TIP}` })
     expect(seen.asked).toEqual(['Compact this session now (the conversation so far is summarized to free context)?'])
     expect(seen.commands).toEqual(['compact'])
-    expect(seen.forks).toEqual([])
+    expect(seen.handoffs).toEqual([])
     expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: /compact queued; it runs when the session is idle.')
     expect((await pane.find({ key: `apply:${TIP}` }))?.props['label']).toBe('Compact')
     await pane.unmount()
   })
 
-  test('while a hand-off is in flight its button reads Writing note…, a second press and Compact are ignored', async ($, on) => {
+  test('while /handoff is in flight the button is dim, a second press and Compact are ignored', async ($, on) => {
     let release = () => {}
-    const forkHold = new Promise<void>(resolve => {
+    const handoffHold = new Promise<void>(resolve => {
       release = resolve
     })
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', forkHold })
+    const seen = world(on, { contextPercent: 91, answer: 'Compact', handoffHold })
     const pane = await mountPane($, seen)
     const first = pane.press({ key: `handoff:${TIP}` })
     await yieldTurns(500)
-    expect(seen.forks).toHaveLength(1)
+    expect(seen.handoffs).toHaveLength(1)
     const handoff = await pane.find({ key: `handoff:${TIP}` })
-    expect([handoff?.props['label'], handoff?.props['dimColor']]).toEqual(['Writing note…', true])
+    expect([handoff?.props['label'], handoff?.props['dimColor']]).toEqual(['Hand off', true])
     expect((await pane.find({ key: `apply:${TIP}` }))?.props['dimColor']).toBe(true)
     await pane.press({ key: `handoff:${TIP}` })
     await pane.press({ key: `apply:${TIP}` })
-    expect(seen.asked).toHaveLength(1)
-    expect(seen.commands).toEqual([])
+    expect(seen.asked).toEqual([])
+    expect(seen.commands).toEqual(['handoff'])
     release()
     await first
-    // The kit settles the first press while its fork is held; the rest of the flow runs on after the release.
-    await yieldTurns(2000)
-    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
-    expect(seen.forks).toHaveLength(1)
-    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['label']).toBe('Hand off')
+    await yieldTurns(500)
+    expect(seen.handoffs).toHaveLength(1)
+    expect((await pane.find({ key: `handoff:${TIP}` }))?.props['dimColor']).toBe(false)
     expect((await pane.find({ key: `apply:${TIP}` }))?.props['dimColor']).toBe(false)
     await pane.unmount()
   })
@@ -1440,7 +1354,7 @@ describe('the context tip: Compact and Hand off', () => {
     expect([handoff?.props['label'], handoff?.props['dimColor']]).toEqual(['Hand off', true])
     await pane.press({ key: `handoff:${TIP}` })
     expect(seen.asked).toHaveLength(1)
-    expect(seen.forks).toEqual([])
+    expect(seen.handoffs).toEqual([])
     release()
     await first
     await yieldTurns(500)
@@ -1448,55 +1362,16 @@ describe('the context tip: Compact and Hand off', () => {
     await pane.unmount()
   })
 
-  test('a running turn defers the hand off; after the turn ends it goes ahead', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off' })
+  test('a running turn refuses the press with a toast and runs nothing; after the turn ends it runs', async ($, on) => {
+    const seen = world(on, { contextPercent: 91 })
     const pane = await mountPane($, seen)
     await $.turn.start({ text: '', turnId: 't1' })
     await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.asked).toEqual([])
-    expect(seen.steps).toEqual([])
+    expect(seen.handoffs).toEqual([])
     expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: a turn is running; hand off once it has finished, so the note covers it.')
     await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' } as never)
     await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.asked).toHaveLength(1)
-    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
-    await pane.unmount()
-  })
-
-  test('a draft in the prompt box is kept: the continue line is appended under it', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', draft: 'half a thought' })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.fillModes).toEqual(['append'])
-    expect(seen.fills).toEqual([`\nContinue from the handoff note at ${NOTE_PATH}: read it first, then carry on with its next step.`])
-    await pane.unmount()
-  })
-
-  test('an unusable HOME stops the hand off before the model call', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', home: 'relative/home' })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.asked).toHaveLength(1)
-    expect(seen.steps).toEqual([])
-    expect(seen.toasts[seen.toasts.length - 1]).toBe('Memory: could not write the handoff note (HOME unknown); nothing was cleared.')
-    await pane.unmount()
-  })
-
-  test('a repo name that is only dots cannot shape the note path: the file is named session', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', root: '/w/evil name/..' })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
-    expect(notes(seen)).toEqual([`${HANDOFFS}2027-01-15-080000-session-11111111.md`])
-    await pane.unmount()
-  })
-
-  test('a repo name with a space and a bidi override becomes a plain file-name piece', async ($, on) => {
-    const seen = world(on, { contextPercent: 91, answer: 'Hand off', root: '/w/my repo\u202E' })
-    const pane = await mountPane($, seen)
-    await pane.press({ key: `handoff:${TIP}` })
-    expect(seen.steps).toEqual(['fork', 'write', 'clear', 'fill'])
-    expect(notes(seen)).toEqual([`${HANDOFFS}2027-01-15-080000-my-repo-11111111.md`])
+    expect(seen.handoffs).toHaveLength(1)
     await pane.unmount()
   })
 
@@ -1504,8 +1379,7 @@ describe('the context tip: Compact and Hand off', () => {
     const seen = world(on, { contextPercent: 91, isPlaced: false })
     await start($, seen)
     const ran = await runMem($)
-    expect(ran.text).toContain('context 91%. Compact to keep going mid-task, or hand off at a milestone (a note is written for the fresh session).')
-    expect(ran.text).not.toContain('Writing note')
+    expect(ran.text).toContain('context 91%. Compact to keep going mid-task, or hand off at the next milestone (a note is written for the fresh session).')
     expect(ran.text).not.toContain('Hand off')
   })
 })

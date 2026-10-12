@@ -2,7 +2,7 @@
 // Kept apart from register.tsx so the tests can hold every parser to its
 // positive and false-positive cases without mounting anything.
 
-import type { CockpitCi, CockpitOption, CockpitPr, CockpitQuestion, CockpitStanding, CockpitWaiting } from '../types'
+import type { CockpitBackground, CockpitCi, CockpitContext, CockpitOption, CockpitPr, CockpitQuestion, CockpitStanding, CockpitWaiting } from '../types'
 
 export const MAX_QUESTIONS = 6
 export const MAX_OPTIONS = 8
@@ -971,4 +971,77 @@ export function archiveReason(standing: CockpitStanding | null): string {
   const pr = standing?.pr
   const what = pr && pr.isMerged ? `PR #${pr.number} merged` : standing?.hasRemote === false ? 'no remote, all committed' : 'no PR'
   return `${what}, tree clean, nothing waiting`
+}
+
+/** What the band knows that bears on "is this a natural break to hand the session off". */
+export type HandoffBreakInput = {
+  standing: CockpitStanding | null
+  /** Items waiting on the person (the `WAITING ON JOSEPH:` lines of the last answer). */
+  waiting: number
+  background: CockpitBackground | null
+  context: CockpitContext | null
+  isWorking: boolean
+  hasPending: boolean
+  /** The option `handoffTokens`: an absolute token count, or 0 for 80 % of the window. */
+  tokensLine: number
+}
+
+export type HandoffBreak = { reason: 'merged' | 'waiting' | 'context'; text: string }
+
+/** A token count the way the chip shows it: 162k, 1.2M. */
+export function formatTokens(tokens: number): string {
+  if (tokens < 1000) return String(Math.max(0, Math.round(tokens)))
+  if (tokens < 999_500) return `${Math.round(tokens / 1000)}k`
+  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+}
+
+/**
+ * Whether now is a natural break to offer a hand-off to a fresh session, and
+ * why: a PR merged at this exact HEAD (the same head test `completion` uses)
+ * and seen merged no earlier than this session began (`mergedSeenAt`, GitHub's
+ * merge time or the refresh that first saw it, against `context.startedAt`,
+ * which /clear starts over: a fresh session on a branch merged before it is
+ * not at a break, and an unknown start or merge time is no break);
+ * items waiting on the person with no agent running (an observation of the
+ * running agents is required: unknown is no break); or the context past an
+ * absolute token line (`tokensLine`, 0 meaning 80 % of the window, and no
+ * window then no line). Never while a turn runs or a reply is queued. One
+ * reason at most, by precedence merged, waiting, context.
+ *
+ * Deliberately not a break: no PR with HEAD already in the default branch,
+ * which a fresh session on main reads as from its first moment, so it would
+ * be offered a hand-off at once.
+ */
+export function handoffBreak(input: HandoffBreakInput): HandoffBreak | null {
+  if (input.isWorking || input.hasPending) return null
+
+  const s = input.standing
+  const pr = s?.pr ?? null
+  const startedAt = input.context?.startedAt ?? null
+  if (
+    s !== null &&
+    pr !== null &&
+    pr.isMerged === true &&
+    pr.headSha !== null &&
+    s.headSha !== null &&
+    (s.headSha.startsWith(pr.headSha) || pr.headSha.startsWith(s.headSha)) &&
+    s.mergedSeenAt !== null &&
+    startedAt !== null &&
+    s.mergedSeenAt >= startedAt
+  ) {
+    return { reason: 'merged', text: `PR #${pr.number} merged` }
+  }
+
+  if (input.waiting > 0 && input.background !== null && input.background.tasks === 0) {
+    return { reason: 'waiting', text: 'waiting on you, no agents running' }
+  }
+
+  const tokens = input.context?.tokens
+  if (typeof tokens === 'number' && Number.isFinite(tokens)) {
+    const window = input.context?.window
+    const line = input.tokensLine > 0 ? input.tokensLine : typeof window === 'number' && window > 0 ? 0.8 * window : Infinity
+    if (tokens >= line) return { reason: 'context', text: `context ${formatTokens(tokens)}` }
+  }
+
+  return null
 }

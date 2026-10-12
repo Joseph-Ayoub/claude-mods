@@ -19,6 +19,9 @@ BANS = [
     (r"Date\.now\(", "the wall clock outside $.clock"),
     (r"\bnew Date\(\)", "the wall clock outside $.clock"),
     (r"Math\.random\(", "randomness"),
+    # $.agent.list() is read for id and type only (SPEC §2, §8): an entry's task description never reaches the state.
+    (r"\.description\b", "reads an agent entry's description (task text)"),
+    (r"\[\s*['\"]description['\"]\s*\]", "reads an agent entry's description (task text)"),
     (r"\[\s*'(mv|rm|git|sh|bash|zsh|curl|wget|nc|ssh|scp|gh|shasum|readlink|which|python3?|mkdir|rmdir)'", "a bare executable name in an argv literal"),
 ]
 

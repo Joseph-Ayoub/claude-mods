@@ -1,7 +1,7 @@
 {
   "name": "rd-ledger",
-  "version": "0.1.0",
-  "description": "Contemporaneous R&D time and AI-usage ledger: engagement hours by business component, list-price usage estimates, a weekly review with buttons, a CPA export, and an optional bridge to rd-tracker. Metadata only, nothing leaves the Mac.",
+  "version": "0.2.0",
+  "description": "Contemporaneous R&D time and AI-usage ledger: engagement hours by business component, list-price usage estimates, a weekly review with buttons, a CPA export, an optional bridge to rd-tracker, and a live Usage pane (cost, context, rate limits, models, subagents, code changes) behind one footer chip. Metadata only, nothing leaves the Mac.",
   "author": {
     "name": "Joseph Ayoub"
   },
@@ -9,9 +9,26 @@
   "userConfig": {
     "footerButton": {
       "type": "boolean",
-      "title": "Footer figure opens the pane",
-      "description": "Draw today's R&D hours and this month's usage estimate as a pressable chip under the composer (the desktop draws every button as a grey chip). Off, the figure is plain text and /rd opens the pane.",
+      "title": "Footer chip opens Usage",
+      "description": "Draw the footer figure as a pressable chip under the composer (the desktop draws every button as a grey chip); a press opens the Usage pane with the R&D ledger as the tab beside it. Off, the figure is plain text and /rd usage opens the panes.",
       "default": true
+    },
+    "footerChip": {
+      "type": "string",
+      "title": "Footer chip shows",
+      "description": "both: the session cost and today's R&D hours ('$123 ⧗2.4h'). cost: the session cost alone. time: today's R&D hours alone. The label stays within 16 characters.",
+      "options": [
+        "both",
+        "cost",
+        "time"
+      ],
+      "default": "both"
+    },
+    "chipContext": {
+      "type": "boolean",
+      "title": "Context in the chip",
+      "description": "Also show the context window's fill (' · ctx 12%'). Off by default: within the 16-character bound the hours give way to it first, and the figure is one press away in the Usage pane.",
+      "default": false
     },
     "refreshMinutes": {
       "type": "number",

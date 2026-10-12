@@ -8,10 +8,10 @@ import re
 import sys
 
 ALLOWED_CALLS = {
-    "$.clock.after", "$.clock.every", "$.clock.now", "$.command.register", "$.env.get",
+    "$.agent.list", "$.clock.after", "$.clock.every", "$.clock.now", "$.command.register", "$.env.get",
     "$.fs.exists", "$.fs.list", "$.fs.read", "$.fs.stat", "$.fs.write", "$.process.run",
     "$.session.cwd", "$.session.id", "$.session.model", "$.session.repo", "$.session.surfaces", "$.session.usage",
-    "$.state.get", "$.state.set", "$.ui.ask", "$.ui.close", "$.ui.log", "$.ui.open", "$.ui.resolve", "$.ui.toast",
+    "$.state.get", "$.state.set", "$.ui.ask", "$.ui.close", "$.ui.log", "$.ui.open", "$.ui.panes", "$.ui.resolve", "$.ui.toast",
 }
 ALLOWED_ENV = {"HOME", "CLAUDE_CODE_ENTRYPOINT", "TZ"}
 

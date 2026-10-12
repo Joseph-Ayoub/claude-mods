@@ -1,6 +1,6 @@
 # cockpit
 
-One band above the Claude Code prompt that replaces the things you keep typing: quick replies, where the branch and PR stand, one-click answers to option questions, the manual steps Claude is waiting on, and a "save this as a standing rule?" offer. It never calls a model.
+One band above the Claude Code prompt that replaces the things you keep typing: quick replies, where the branch and PR stand, one-click answers to option questions, the manual steps Claude is waiting on, a "save this as a standing rule?" offer, and a **Hand off** chip at a natural break. It never calls a model itself (the chip runs the handoff mod's `/handoff`, which asks first).
 
 It owns the `AbovePrompt` band because that band is a single instance shared with surveys: several band mods would hide each other.
 
@@ -38,15 +38,28 @@ Each section folds to its toggle (the `▾`/`▸` label on its left); the fold i
    - The rule goes under a `## Captured rules` heading, created if missing, at the end of that section: never a blind append, so a generated block at the end of a file stays whole. A heading inside a code block is not used, and a file with Windows line endings keeps them. The write re-checks the file's modification time just before writing and tries once more if another session changed it; if it keeps changing nothing is written and the offer stays.
    - Before offering, the band checks the global file and this project's `CLAUDE.md`. A rule already there as a line of its own (in any section, outside code), or saved there from an earlier prompt, is not offered again. Saving to one project does not stop the offer in another.
 
+6. **Hand off at a natural break.** Joseph's standing rule is to end a lead session at a milestone and continue in a fresh one from a written note. At a natural break the Standing row offers **Hand off**, followed by a dim reason:
+   - `PR #N merged`: the PR for this branch is merged at this exact HEAD (the same head test the archive check uses), and the merge was seen no earlier than this session began (GitHub's merge time, or the refresh that first saw it, against `$.session.usage().startedAt`, which `/clear` starts over), so a fresh session on a branch merged before it is not offered a hand-off at once;
+   - `waiting on you, no agents running`: the last answer left `WAITING ON JOSEPH:` items and the observation after it listed no running agent (unknown counts as running);
+   - `context 162k`: the context window holds at least `handoffTokens` tokens (150k by default). The figure is absolute tokens, never a share of the window: past about 150k each turn costs, waits and thins out more whatever the window's size.
+
+   One reason shows at a time, in that order. Never while Claude works or a quick reply is queued. "No PR, HEAD already in the default branch" is deliberately not a break: a fresh session on `main` reads so from its first moment and would be offered a hand-off at once.
+
+   On `/clear` the band forgets the old conversation: its waiting items, its decision cards, its observation of running agents and its context reading go at once, before any turn, so no break carried over from it is offered. The context reading starts again with no fill and no session start; the start is read from `$.session.usage()` just after the clear, and until a read succeeds there is no merged break (unknown never passes). A usage read that was still on its way when the clear came, or one that still reports the forgotten conversation's start, is dropped, so the old fill or start never returns. A resume that swaps the conversation in the same process (`session.end` with `reason: 'resume'`) is forgotten the same way. A plain `/clear` drops the waiting reminders with it (your next prompt would have retired them anyway); `/handoff` carries them into the note's "Waiting on / open questions" section first.
+
+   A press runs `/handoff` (`$.command.run({ command: 'handoff' })`, origin plugin `cockpit`, not awaited): the handoff mod asks first, writes the note under `~/.claude/handoffs/`, clears the conversation only once the note is written, and pre-fills the next prompt; nothing is submitted. A press that lands after a turn started runs nothing and says `Cockpit: wait for the turn to end, then hand off.` The chip has no hotkey, since a hand-off ends in a `/clear`. It shows only while a plugin lists the `handoff` command (`$.command.list()`, re-read with every standing refresh and after `session.start`), so nothing advertises a mod that is not installed; if the run is refused anyway, a toast names the install line: `claude plugin install handoff@joseph-mods --scope user` (or `/plugin install handoff --marketplace Joseph-Ayoub/claude-mods`). See `mods/handoff/README.md` for the flow itself.
+
 ## Hooks it registers
 
 | Hook | Kind | What it does |
 | --- | --- | --- |
-| `session.start` | observer | Arms the one-minute standing refresh when a surface that draws the band (terminal or desktop) is attached, read from `$.session.surfaces()`, not from `isInteractive` (false for the desktop app's SDK-hosted session). With none attached (`-p`) it does not poll. |
+| `session.start` | observer | Arms the one-minute standing refresh when a surface that draws the band (terminal or desktop) is attached, read from `$.session.surfaces()`, not from `isInteractive` (false for the desktop app's SDK-hosted session). With none attached (`-p`) it does not poll. After `next(e)` (so a plugin beneath has registered its commands) it reads the host, the command list among it, and the context fill from `$.session.usage()` (for a reload; a `/clear` fires no `session.start`, see `session.end`). |
+| `session.end` | observer | After `next(e)` (even when a hook beneath throws), on `reason: 'clear'` or `'resume'` (the one word a mod gets of a `/clear`, or of a resume that swaps the conversation in this process): empties the waiting items, the decision cards and the agent observation, resets the context reading (no tokens, no start, the window kept), drops any usage read begun before it, and reads `$.session.usage()` again from a zero-delay timer once the engine has moved on. Any other reason changes nothing. |
 | `session.attach` | observer | Arms the refresh when the desktop app attaches to a session that started without a band surface. |
 | `tool.call` | observer, gating site with `.catch` that replays `next` | Stamps the last tool time (not awaited) and lazily re-arms the refresh after a hot reload (still only with a band surface attached). Never refuses a tool. |
-| `turn.start` | observer | Clears a pending quick reply once its turn starts. |
-| `turn.complete` | observer | Main loop only (`agentId` undefined): refreshes the standing line without holding the answer; on `reason: 'answer'` parses decision cards and waiting items. Returns the answer's result unchanged. |
+| `turn.start` | observer | Clears a pending quick reply once its turn starts, and marks a main-loop turn in flight (a Hand off press re-checks it). |
+| `turn.complete` | observer | Main loop only (`agentId` undefined): ends the turn in flight (in a `finally`, so a hook beneath that throws cannot leave Hand off refused); refreshes the standing line, and through it the host and the command list, without holding the answer; reads the context fill from `$.session.usage()`; on `reason: 'answer'` parses decision cards and waiting items. Returns the answer's result unchanged. |
+| `session.measure` | observer | Keeps the context fill (`e.context.tokens` and `window`) after `next(e)`, written only when it moved, for the Hand off chip. |
 | `prompt.submit` | guard, fails open (`.catch` replays `next`) | Drops an exact duplicate (normalized) of one of your last five prompts from the last ten minutes, only when it was typed over a running turn (`turnId` set), not queued on purpose (`wait` not true), and from you (`composer`, `bridge` or `sdk` origin: the desktop app hosts its sessions over the SDK); puts the text back in the prompt if it is empty. After the hooks beneath let a prompt through (never for one they dropped): a prompt from you (`composer`, `bridge` or `sdk`) retires the cards and the waiting items and is checked for a standing-rule sentence. |
 | `ui.render` on `AbovePrompt` | drawing | Draws the band on terminal and desktop, sized to `bodyColumns`; yields (`next(e)`) to a survey and while a subagent's transcript is open. |
 
@@ -56,7 +69,11 @@ Each section folds to its toggle (the `▾`/`▸` label on its left); the fold i
 
 Each quick-reply phrase is a `userConfig` field, editable in `/config` or under `pluginConfigs.cockpit` in settings: `replyGo`, `replyResume`, `replyTryAgain`, `replyStatus`, `replyCompletion`. An empty value falls back to the default above. A custom phrase is cleaned to printable ASCII like a Done item, and the band shows it under the buttons (`Go sends: "..."`), since it goes out as your words.
 
+`handoffTokens` (number, default 150000, held to 20000 to 1000000) is where the Hand off chip offers itself on context alone: an absolute token count, since past about 150k each turn costs, waits and thins out more whatever the window. 0 falls back to 80 % of the window (no chip on context when the window is unknown).
+
 ## Loading it
+
+Install it from the marketplace (terminal session): `/plugin install cockpit --marketplace Joseph-Ayoub/claude-mods`, or from this folder's marketplace at user scope: `claude plugin install cockpit@joseph-mods --scope user`.
 
 From a terminal, for one session:
 
@@ -78,6 +95,7 @@ claude plugin test mods/cockpit
 - Recent prompts are compared by the SHA-256 of their normalized text; the text itself is never kept.
 - A drop reason quotes your prompt only when it is 60 characters or less and has nothing token-shaped in it; otherwise it says "your earlier prompt".
 - A sentence that looks like it holds a credential (known token prefixes, private-key headers, any unbroken 32+ character run) is never offered as a rule.
+- For the Hand off chip it reads the command list (`$.command.list()`, names and sources only) and the context fill (`$.session.usage()`, the plain call, which costs nothing), and runs `/handoff` only when you press the chip. It keeps three figures in session state: the token count, the window and the session's start time (`startedAt`, to tell a merge from before the session); the note itself is the handoff mod's.
 - `$.store` (shared by every session) holds only hashes of saved rules, one key per rule and file it went to (`capturedRule:<sha256>`), so two sessions saving at once never overwrite each other's record.
 
 ## Known limits
@@ -95,4 +113,5 @@ claude plugin test mods/cockpit
 - While Claude works, a quick-reply press says `Claude is working, so <reply> was not sent` rather than the spec's "already queued", because nothing was queued (verifier V19, awaiting the lead's acceptance).
 - The duplicate guard, rule capture and waiting list treat `composer`, `bridge` and `sdk` origins as you; every other origin (a notification, a peer, a schedule) is not you. That the desktop app stamps your prompts `sdk` was not checked on a live desktop session.
 - After you click a band button, the keyboard focus can stay on it, and the declarations say Enter under the focus presses a focused Button. So an Enter pressed while the band holds the focus could press Go, Resume or Session completion again once the turn ends. Send answers, Done and the rule buttons cannot fire twice (each clears what it sends). Not reproduced: no interactive host was available, and the test kit cannot deliver keys to the band. Click back into the prompt before typing.
+- The Hand off chip, its press and the forgetting on `/clear` (the engine's `session.end` with `reason: 'clear'`) were tested in the kit on both surfaces, not yet seen live on the desktop. GitHub's merge time is compared with this Mac's clock, as the archive check does; a merge seen before `$.session.usage()` first answered in a session is no break there.
 - The tests cannot type into the band (the kit's `key` reaches only a `Client`), so "typed letters never send Go" is checked by modelling the engine's hotkey dispatch over every printable character, plus the pinned hotkey list. Likewise the hot-reload re-arm is tested by events arriving with no new `session.start`, not by a real reload.

@@ -376,6 +376,8 @@ export type RegistryEntry = {
   model: string
   rssMB: number | null
   contextPercent: number | null
+  contextTokens: number | null
+  contextWindow: number | null
   rateLimitPercent: number | null
   agents: number
   lastActivityAt: number
@@ -419,6 +421,9 @@ export function parseEntry(text: string): RegistryEntry | null {
     model: line(o['model'], 80),
     rssMB: numOrNull(o['rssMB']),
     contextPercent: numOrNull(o['contextPercent']),
+    // An entry an older build wrote has neither; null makes the tip fall back to the percent.
+    contextTokens: numOrNull(o['contextTokens']),
+    contextWindow: numOrNull(o['contextWindow']),
     rateLimitPercent: numOrNull(o['rateLimitPercent']),
     agents: isNum(o['agents']) ? Math.max(0, Math.round(o['agents'])) : 0,
     lastActivityAt: isNum(o['lastActivityAt']) ? o['lastActivityAt'] : 0,
@@ -459,6 +464,8 @@ export function rowOf(entry: RegistryEntry, status: SessionStatus, now: number, 
     model: entry.model,
     rssMB: entry.rssMB,
     contextPercent: entry.contextPercent,
+    contextTokens: entry.contextTokens,
+    contextWindow: entry.contextWindow,
     rateLimitPercent: entry.rateLimitPercent,
     agents: entry.agents,
     idleMinutes: entry.lastActivityAt > 0 ? Math.max(0, Math.floor((now - entry.lastActivityAt) / 60_000)) : null,
@@ -506,6 +513,8 @@ export function engineRow(pid: number, rssMB: number, session: EngineSession): S
     model: '',
     rssMB,
     contextPercent: null,
+    contextTokens: null,
+    contextWindow: null,
     rateLimitPercent: null,
     agents: 0,
     idleMinutes: session.idleMinutes,
@@ -532,6 +541,15 @@ export function glyph(usedPercent: number | null): string {
 export function formatMB(mb: number | null): string {
   if (mb === null || !Number.isFinite(mb)) return '?'
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`
+}
+
+/** "572", "12.3k", "184k" (whole k from 100k), "1.2M": a token count short enough for a tip's text. */
+export function formatTokens(n: number | null): string {
+  if (n === null || !Number.isFinite(n) || n < 0) return '?'
+  const tenth = (v: number) => String(Math.round(v * 10) / 10)
+  if (Math.round(n) < 1000) return String(Math.round(n))
+  if (Math.round(n / 1000) >= 1000) return `${tenth(n / 1_000_000)}M`
+  return n < 100_000 && Math.round((n / 1000) * 10) / 10 < 100 ? `${tenth(n / 1000)}k` : `${Math.round(n / 1000)}k`
 }
 
 export const formatBytes = (bytes: number | null): string => formatMB(bytes === null ? null : bytes / MB)

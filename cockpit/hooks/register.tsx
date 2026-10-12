@@ -2,22 +2,24 @@
 // AbovePrompt is a single instance shared with surveys and every other band
 // mod. It draws quick replies, the branch/PR/CI standing line, decision cards
 // parsed from the last answer, "waiting on you" items and a standing-rule
-// capture prompt, each section folding to its toggle.
+// capture prompt, each section folding to its toggle. At a natural break it
+// offers Hand off, which runs the handoff mod's /handoff (when that is listed).
 //
 // Everything a drawing reads lives in $.state (it survives a hot reload); the
 // only module variables are the timer's armed flag and the in-flight promises,
 // all of which are meant to reset when the module reloads.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, Register, RenderSurface } from 'claude-code'
+import type { EngineInterface, PluginOptions, Register, RenderSurface, SessionContextUsage } from 'claude-code'
 
-import type { CockpitBackground, CockpitCards, CockpitCollapsed, CockpitHost, CockpitPr, CockpitRule, CockpitStanding, CockpitWaiting } from '../types'
+import type { CockpitBackground, CockpitCards, CockpitCollapsed, CockpitContext, CockpitHost, CockpitPr, CockpitRule, CockpitStanding, CockpitWaiting } from '../types'
 import {
   answersText,
   archiveReason,
   completion,
   fillOutcome,
   findRuleSentence,
+  handoffBreak,
   hasRule,
   insertCapturedRule,
   labelMarksRecommended,
@@ -46,6 +48,7 @@ const COLLAPSED = { plugin: 'cockpit', key: 'collapsed' } as const
 const LAST_REPORT_AT = { plugin: 'cockpit', key: 'lastReportAt' } as const
 const BACKGROUND = { plugin: 'cockpit', key: 'background' } as const
 const HOST = { plugin: 'cockpit', key: 'host' } as const
+const CONTEXT = { plugin: 'cockpit', key: 'context' } as const
 
 const pending = atom(PENDING, null)
 const standing = atom(STANDING, null)
@@ -56,7 +59,8 @@ const rule = atom(RULE, null)
 const collapsed = atom(COLLAPSED, { replies: false, standing: false, cards: false, waiting: false, rule: false })
 const lastReportAt = atom(LAST_REPORT_AT, 0)
 const background = atom(BACKGROUND, null)
-const host = atom(HOST, { archiveTool: false, lead: null, leadState: 'unknown' })
+const host = atom(HOST, { archiveTool: false, lead: null, leadState: 'unknown', handoffCommand: false })
+const context = atom(CONTEXT, null)
 const recent = atom(RECENT, [])
 
 const REFRESH_MS = 60_000
@@ -78,6 +82,14 @@ const REFILL_DELAY_MS = 250
 const PR_FIELDS = 'number,state,mergeable,mergeStateStatus,statusCheckRollup,mergedAt,headRefOid,url'
 // $.process.run inherits the Claude process's PATH, not the login shell's, so a desktop-launched session may need these.
 const GH_CANDIDATES = ['gh', '/opt/homebrew/bin/gh', '/usr/local/bin/gh'] as const
+/** The handoff mod's command, run by the Hand off chip; the chip shows only while it is listed. */
+const HANDOFF_COMMAND = 'handoff'
+const HANDOFF_MISSING = 'Cockpit: the Hand off button needs the handoff mod (claude plugin install handoff@joseph-mods --scope user).'
+// Absolute tokens, never a share of the window: past about 150k every turn costs, waits and
+// thins out more whatever the window's size, so that is where a fresh session pays.
+const HANDOFF_TOKENS_DEFAULT = 150_000
+const HANDOFF_TOKENS_MIN = 20_000
+const HANDOFF_TOKENS_MAX = 1_000_000
 // One $.store key per saved rule and file, so two sessions saving at once never overwrite each other's
 // record (the store has no compare-and-swap); a set of a fixed key is idempotent.
 const capturedKey = (digest: string) => `capturedRule:${digest}`
@@ -131,6 +143,16 @@ const replyText = (options: PluginOptions, reply: Reply): string => {
   return text !== '' ? text : reply.fallback
 }
 
+/**
+ * The option `handoffTokens` as the judge takes it: 0 stays 0 (80 % of the window), any other
+ * number is held to 20k..1M, and anything else is the 150k default.
+ */
+const handoffLine = (options: PluginOptions): number => {
+  const value = options['handoffTokens']
+  if (value === 0) return 0
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(HANDOFF_TOKENS_MAX, Math.max(HANDOFF_TOKENS_MIN, value)) : HANDOFF_TOKENS_DEFAULT
+}
+
 // Timers die with the module on a hot reload, and this flag dies with them: the
 // first event after a reload finds it false and arms a fresh timer.
 let isArmed = false
@@ -146,6 +168,16 @@ let stopSeq = 0
 // This load's own mark on every Stop: a standing saved by an earlier load never matches a Stop of this one.
 const loadToken = `${Math.floor(Math.random() * 0x7fffffff).toString(36)}-${Math.floor(Math.random() * 0x7fffffff).toString(36)}`
 let hostLooking: Promise<void> | null = null
+// A main-loop turn between turn.start (main loop only) and its turn.complete: the band's
+// isWorking is as of its last drawing, so a press re-checks this. A reload mid-turn resets
+// it to false, and the drawing's isWorking covers that turn.
+let isTurnLive = false
+// Bumped by each /clear: a context reading begun before it is dropped rather than landing on the
+// conversation that follows (it would bring back the old fill or the old start).
+let contextGen = 0
+// The start of the conversation the last /clear (or resume) forgot: a usage read that still
+// reports it landed before the engine moved on, and is dropped rather than revived.
+let forgottenStart: number | null = null
 let ghBinary: string | null = null
 
 const isBandSurface = (surface: RenderSurface | null | undefined): boolean => surface === 'terminal' || surface === 'desktop'
@@ -286,10 +318,11 @@ async function lookStanding($: Engine): Promise<CockpitStanding> {
 
 /**
  * What the host can tell the band, re-read with every refresh (a server may
- * connect later): whether the app's archive tool is listed, and this session's
- * parent (lead) session, from the app's own record. A host that answers
- * nothing leaves "no lead" and "no archive tool": the button never shows on a
- * guess. Never throws.
+ * connect later, a mod may be installed or reloaded): whether the app's
+ * archive tool is listed, this session's parent (lead) session, from the
+ * app's own record, and whether a plugin lists `/handoff`. A host that answers
+ * nothing leaves "no lead", "no archive tool" and "no handoff command": no
+ * button ever shows on a guess. Never throws.
  */
 function lookHost($: Engine): Promise<void> {
   if (hostLooking !== null) return hostLooking
@@ -298,6 +331,9 @@ function lookHost($: Engine): Promise<void> {
       const held = await read($, host)
       const tools = await $.tool.list().catch(() => [])
       const archiveTool = tools.some(t => t.name === ARCHIVE_TOOL_FULL)
+      // Only a plugin's command: a user command of the same name is not the flow the chip promises.
+      const commands = await $.command.list().catch(() => [])
+      const handoffCommand = commands.some(c => c.name === HANDOFF_COMMAND && c.source === 'plugin')
       let lead = held.lead
       let leadState = held.leadState
       if (tools.some(t => t.name === `mcp__${HOST_SERVER}__${GET_SESSION_TOOL}`)) {
@@ -313,7 +349,7 @@ function lookHost($: Engine): Promise<void> {
           leadState = read.lead === null ? 'none' : 'known'
         }
       }
-      await $.state.set(HOST, { archiveTool, lead, leadState })
+      await $.state.set(HOST, { archiveTool, lead, leadState, handoffCommand })
     } catch {
       // the previous answer stands
     } finally {
@@ -415,6 +451,89 @@ async function archiveSession($: Engine, reason: string): Promise<void> {
   } catch (err) {
     $.ui.toast(`Cockpit: archive not done (${err instanceof Error && err.name ? err.name : 'error'}).`)
   }
+}
+
+/**
+ * Keeps the context fill the band judges a hand-off by, from a measurement or
+ * `$.session.usage()`. Writes only when the figures moved, so a cost-only
+ * measurement does not redraw the band. Never throws.
+ */
+async function keepContext($: Engine, usage: SessionContextUsage | undefined, startedAt: number | undefined, gen: number): Promise<void> {
+  try {
+    const tokens = typeof usage?.tokens === 'number' && Number.isFinite(usage.tokens) ? usage.tokens : null
+    const window = typeof usage?.window === 'number' && Number.isFinite(usage.window) && usage.window > 0 ? usage.window : null
+    const at = await $.clock.now()
+    await update($, context, held => {
+      // Taken before a /clear: the fresh conversation's reading stands.
+      if (gen !== contextGen) return held
+      // Taken after it but answered with the forgotten conversation's own start: too early, dropped.
+      if (typeof startedAt === 'number' && forgottenStart !== null && startedAt === forgottenStart) return held
+      // A measurement carries no start: the one last read from $.session.usage() stands (null after a /clear until read).
+      const began = typeof startedAt === 'number' && Number.isFinite(startedAt) ? startedAt : (held?.startedAt ?? null)
+      return held !== null && held.tokens === tokens && held.window === window && held.startedAt === began ? held : ({ tokens, window, at, startedAt: began } satisfies CockpitContext)
+    })
+  } catch {
+    // the last reading stands
+  }
+}
+
+/**
+ * Reads the context fill and the session's start now (the plain call costs nothing). A failed
+ * read changes nothing, so a start a /clear set to null stays null (no merged break) until a
+ * read succeeds. Never throws.
+ */
+async function readContext($: Engine): Promise<void> {
+  const gen = contextGen
+  const usage = await $.session.usage().catch(() => null)
+  if (usage !== null) await keepContext($, usage.context, usage.startedAt, gen)
+}
+
+/**
+ * A /clear ended the conversation: the process goes on under a new session id and no
+ * session.start follows, so this is the band's only word of it. The old conversation's
+ * waiting items, decision cards and agent observation go with it, and the context reading
+ * starts over with no fill and no start (the window stays: same model), so no hand-off break
+ * reads from the old conversation; the merged break fails closed until the fresh start is
+ * read. That read waits for a zero-delay timer, once the engine has moved on to the new
+ * session; a refused timer leaves it to the next main-loop turn end. Never throws.
+ */
+async function forgetConversation($: Engine): Promise<void> {
+  contextGen += 1
+  try {
+    const at = await $.clock.now()
+    await update($, context, held => {
+      forgottenStart = held?.startedAt ?? forgottenStart
+      return { tokens: null, window: held?.window ?? null, at, startedAt: null } satisfies CockpitContext
+    })
+  } catch {
+    // a reading begun before the clear is dropped by the generation either way
+  }
+  await update($, waiting, () => []).catch(() => undefined)
+  await update($, cards, () => null).catch(() => undefined)
+  await update($, background, () => null).catch(() => undefined)
+  try {
+    $.clock.after(0, () => void readContext($))
+  } catch {
+    // the next main-loop turn end reads it
+  }
+}
+
+/**
+ * The person pressed Hand off: runs the handoff mod's `/handoff`, which asks
+ * before it writes the note and clears. Not mid-turn (the note would miss the
+ * turn, and the command would queue behind it). The run is never awaited: the
+ * engine queues it until the session is idle and the dialog may wait on the
+ * person. A rejection (the mod is not installed, or was just removed) says how
+ * to install it. Never throws.
+ */
+function offerHandoff($: Engine, isWorking: boolean): void {
+  if (isWorking || isTurnLive) {
+    $.ui.toast('Cockpit: wait for the turn to end, then hand off.')
+    return
+  }
+  void $.command.run({ command: HANDOFF_COMMAND }).catch(() => {
+    $.ui.toast(HANDOFF_MISSING)
+  })
 }
 
 async function lookPr($: Engine, cwd: string): Promise<{ pr: CockpitPr | null; prStatus: CockpitStanding['prStatus'] }> {
@@ -865,13 +984,33 @@ async function dismissRule($: Engine): Promise<void> {
 
 export const register: Register = (on, options) => {
   const replies = REPLIES.map(reply => ({ ...reply, text: replyText(options, reply) }))
+  const tokensLine = handoffLine(options)
 
   // No band surface at start (-p, or the SDK before the desktop attaches): the
   // next events and session.attach ask again, so nothing polls until one draws.
-  on('session.start', ($, e, next) => {
+  on('session.start', async ($, e, next) => {
     void arm($, isBandSurface(e.surface)).catch(() => undefined)
 
-    return next(e)
+    const result = await next(e)
+
+    // After the chain beneath: a plugin there registers its commands during its own session.start.
+    // The context is read too, for a reload (a /clear fires no session.start: session.end below).
+    void lookHost($)
+    void readContext($)
+
+    return result
+  })
+
+  // Observer: a /clear arrives only as this, with reason 'clear'; a resume that swaps the
+  // conversation in this process arrives as 'resume' (the process goes on under another id
+  // either way, with no session.start). Forgotten even when a hook beneath throws: the
+  // conversation is gone either way.
+  on('session.end', async ($, e, next) => {
+    try {
+      return await next(e)
+    } finally {
+      if (e.reason === 'clear' || e.reason === 'resume') await forgetConversation($)
+    }
   })
 
   on('session.attach', ($, e, next) => {
@@ -930,28 +1069,49 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('turn.start', ($, e, next) => {
+    isTurnLive = true
     void clearPendingFor($, e.text).catch(() => undefined)
     // A new turn may start background work: only a Stop after it says what is running.
     void $.state.set(BACKGROUND, null).catch(() => undefined)
 
-    return next(e)
+    // A chain beneath that rejects may never see its turn.complete: the flag is undone then.
+    return next(e).catch(err => {
+      isTurnLive = false
+      throw err
+    })
   })
 
   // Subagent turns fire this too: only the main loop's answer feeds the band.
   on('turn.complete', async ($, e, next) => {
-    const result = await next(e)
+    let result: Awaited<ReturnType<typeof next>>
+    try {
+      result = await next(e)
+    } finally {
+      // Even when a hook beneath throws: a flag left set would refuse every Hand off press.
+      if (e.agentId === undefined) isTurnLive = false
+    }
 
     if (e.agentId === undefined) {
       void arm($).catch(() => undefined)
 
-      // What is running now (an un-armed session skips the refresh, not the count), then the standing.
+      // What is running now (an un-armed session skips the refresh, not the count), then the standing
+      // and, through it, the host (the command list among it). The context fill is read here too.
       void observeBackground($)
+      void readContext($)
 
       if (e.reason === 'answer') {
         await absorbAnswer($, e.answer, e.turnId).catch(() => undefined)
       }
     }
 
+    return result
+  })
+
+  // Observer: the context fill as the engine measures it, for the Hand off chip.
+  on('session.measure', async ($, e, next) => {
+    const gen = contextGen
+    const result = await next(e)
+    await keepContext($, e.context, undefined, gen)
     return result
   })
 
@@ -1029,6 +1189,20 @@ export const register: Register = (on, options) => {
       lastReportAt: reportAt,
     })
     const reason = archiveReason(standingNow)
+    const contextNow = await read($, context)
+    // Offered only while a plugin lists the command: nothing advertises a mod that is not there.
+    const handoffAt =
+      hostNow.handoffCommand === true
+        ? handoffBreak({
+            standing: standingNow,
+            waiting: waitingNow.length,
+            background: backgroundNow,
+            context: contextNow,
+            isWorking,
+            hasPending: queued !== null && now - queued.at < PENDING_EXPIRY_MS,
+            tokensLine,
+          })
+        : null
     // An idle session that is not done says what stands, so the missing button is never a mystery.
     const showBlockers = !done.isReady && !isWorking && standingNow !== null
     const width = Math.max(1, e.props.bodyColumns)
@@ -1094,6 +1268,9 @@ export const register: Register = (on, options) => {
             <Button key="archive" label="Archive session" onPress={() => void archiveSession($, reason)} />
           )}
           {!fold.standing && done.isReady && !hostNow.archiveTool && <Text dimColor>done: ready to archive (use the app)</Text>}
+          {/* No hotkey: a hand-off ends in a /clear, so it goes only on an explicit press. */}
+          {!fold.standing && handoffAt !== null && <Button key="handoff" label="Hand off" onPress={() => offerHandoff($, isWorking)} />}
+          {!fold.standing && handoffAt !== null && <Text dimColor>{handoffAt.text}</Text>}
         </Box>
         {!fold.standing && showBlockers && (
           <Text dimColor wrap="truncate-end">

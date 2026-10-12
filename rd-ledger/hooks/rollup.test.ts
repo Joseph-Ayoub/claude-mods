@@ -3,7 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { ConfirmedRow, EngagementEvent, Mapping, ReviewFile, SessionRecord, TurnRecord } from '../types'
 import { D1, F1_EVENTS, F1_REPOS, PARAMS, S1, S2, S3, SEG, ZONE } from './fixtures/ground-truth'
 import { emptyMapping } from './mapping'
-import { computeRollup, type RollupInput } from './rollup'
+import { computeRollup, type RollupInput, scopeWeeks } from './rollup'
 import { admitEvent, newSegment } from './store'
 
 /** 2026-10-11 20:00 in New York (EDT): ISO week 2026-W41, today 10-11. */
@@ -90,6 +90,58 @@ describe('rollup over F1', () => {
     expect(r.health).toEqual({ zone: ZONE, zoneDetectedNow: ZONE, pricesAsOf: '2026-10-06', sessionsInScope: 3, segmentsInScope: 4, unreadable: 0, deniedByReason: { 'automation-entrypoint': 1, 'origin:task-notification': 1 }, redactions: 0, rowsDropped: 0, daysSinceExport: null, storeIsLink: false, bridge: 'off', readOnly: false })
   })
 
+  test('the R&D view figures: gross spans, the weekly trend, by entity, component and class, flagged and longest days', async () => {
+    const r = computeRollup(input())
+    // 10-11 (W41): admitted events e1 (t 32400) .. e14 (t 85680) span 53280 s; net is the four blocks, 3300 + 60 + 5040 + 5600 = 14000.
+    // 10-12 (W42, after now): e15 (87360) .. e19 (119800) span 32440 s; net 2800 + 1000 = 3800.
+    expect([r.weekGrossS, r.todayGrossS, r.lastWeekTotalS]).toEqual([53280, 53280, 0])
+    // Scope starts at the week holding 2026-09-01 (W36) and ends at this week; W42 is after now and not listed.
+    expect(r.weekTrend).toEqual([
+      { week: '2026-W41', netS: 14000, grossS: 53280, confirmed: false },
+      { week: '2026-W40', netS: 0, grossS: 0, confirmed: false },
+      { week: '2026-W39', netS: 0, grossS: 0, confirmed: null },
+      { week: '2026-W38', netS: 0, grossS: 0, confirmed: null },
+      { week: '2026-W37', netS: 0, grossS: 0, confirmed: null },
+      { week: '2026-W36', netS: 0, grossS: 0, confirmed: null },
+    ])
+    // comp-alpha 1980 + comp-beta 6640 under acme; the unmapped bucket keeps its own row, so the rows add up to the week.
+    expect(r.byEntity).toEqual([
+      { entity: 'acme', seconds: 8620 },
+      { entity: '__unmapped__', seconds: 5380 },
+    ])
+    expect(r.byComponent).toEqual([
+      { component: 'comp-beta', entity: 'acme', activity: 'direct_support', seconds: 6640 },
+      { component: '__unmapped__', entity: '', activity: null, seconds: 5380 },
+      { component: 'comp-alpha', entity: 'acme', activity: 'direct_research', seconds: 1980 },
+    ])
+    expect(r.activityMix).toEqual([
+      { activity: 'direct_research', seconds: 1980, poeS: 1980 },
+      { activity: 'direct_support', seconds: 6640, poeS: 0 },
+      { activity: 'non_qualified', seconds: 0, poeS: 0 },
+      { activity: 'unclassified', seconds: 5380, poeS: 0 },
+    ])
+    expect(r.byEntity.reduce((s, e) => s + e.seconds, 0)).toBe(r.weekTotalS)
+    expect(r.activityMix.reduce((s, a) => s + a.seconds, 0)).toBe(r.weekTotalS)
+    expect(r.flaggedDays).toEqual([{ date: '2026-10-11', reason: 'block-over-4h', netS: 14000, grossS: 53280 }])
+    expect(r.longestDays).toEqual([{ date: '2026-10-11', netS: 14000, grossS: 53280 }])
+    expect(r.entityIds).toEqual(['acme'])
+    // The next day: 10-11 becomes last week, W42 is this week with its one day.
+    const next = computeRollup(input({ now: D1 + 86_400_000 + 12 * 3_600_000 }))
+    expect([next.weekTotalS, next.weekGrossS, next.todayGrossS, next.lastWeekTotalS]).toEqual([3800, 32440, 32440, 14000])
+    expect(next.weekTrend.slice(0, 2)).toEqual([
+      { week: '2026-W42', netS: 3800, grossS: 32440, confirmed: false },
+      { week: '2026-W41', netS: 14000, grossS: 53280, confirmed: false },
+    ])
+    // A confirmed W41 reads confirmed in the trend.
+    expect(computeRollup(input({ reviews: new Map([['2026-W41', confirmedW41(F1_W41_FROZEN)]]) })).weekTrend[0]?.confirmed).toBe(true)
+  })
+
+  test('scopeWeeks: from the week of the first of last month to this week, across a year end', async () => {
+    expect(scopeWeeks('2026-10-11')).toEqual(['2026-W36', '2026-W37', '2026-W38', '2026-W39', '2026-W40', '2026-W41'])
+    expect(scopeWeeks('2027-01-04')).toEqual(['2026-W49', '2026-W50', '2026-W51', '2026-W52', '2026-W53', '2027-W01'])
+    expect(scopeWeeks('2026-03-01')).toEqual(['2026-W05', '2026-W06', '2026-W07', '2026-W08', '2026-W09'])
+  })
+
   test('spend for this and last month and the engine cost', async () => {
     const r = computeRollup(input())
     // opus-5-5 1M input = 4.00; sonnet-5 1M cache write under the 1h default = 2 x 2.0 = 4.00.
@@ -154,6 +206,8 @@ describe('rollup over F1', () => {
 
   test('empty scope: zero totals, no rows, null engine cost, zero spend', async () => {
     const r = computeRollup(input({ segments: [] }))
+    expect([r.weekGrossS, r.lastWeekTotalS, r.byEntity, r.byComponent, r.flaggedDays, r.longestDays]).toEqual([0, 0, [], [], [], []])
+    expect(r.activityMix.every(a => a.seconds === 0 && a.poeS === 0)).toBe(true)
     expect([r.todayS, r.weekTotalS, r.weekRows.length, r.queue.length, r.flags.length, r.engineCost, r.spendMonthUsd]).toEqual([0, 0, 0, 0, 0, null, 0])
     expect(r.health.sessionsInScope).toBe(0)
   })

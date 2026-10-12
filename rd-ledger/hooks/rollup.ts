@@ -1,4 +1,4 @@
-// rd-ledger: the rollup the pane and footer draw (SPEC §6.6). Workstream W1.
+// rd-ledger: the rollup the pane and footer draw (SPEC §6.7). Workstream W1.
 // Pure: decoded segments in, a Rollup out. The register owns the file cache.
 //
 // One pass of union-v2 runs over every admitted event in scope (this and last
@@ -6,7 +6,7 @@
 // see the same blocks; the week, the day totals and the queue are then cuts of
 // that one allocation table, which is why they always sum to each other.
 
-import type { Activity, AgentSummary, Allocation, Block, EngineCost, Health, Mapping, QueueRow, Recommendation, ReviewFile, ReviewRevision, Rollup, SessionRecord, SessionRow, SessionSummary, SpendRow, TokenCounts, TurnRecord, UnionEvent, UnionParams, WeekRow } from '../types'
+import type { Activity, ActivityHours, AgentSummary, Allocation, Block, ComponentHours, DayFigure, EngineCost, EntityHours, Flag, FlaggedDay, Health, Mapping, QueueRow, Recommendation, ReviewFile, ReviewRevision, Rollup, SessionRecord, SessionRow, SessionSummary, SpendRow, TokenCounts, TurnRecord, UnionEvent, UnionParams, WeekRow, WeekTrendRow } from '../types'
 import { isNewLocation, pretag } from './mapping'
 import { PRICES_AS_OF, priceRow, priceTurn, spendByMonth } from './prices'
 import { emptyReview, latestConfirmed, missingLiveRows, reviewStatus, rowStatus } from './review'
@@ -510,6 +510,142 @@ export const summarizeSessions = (segments: readonly SessionRecord[], params: Un
 }
 
 /**
+ * Every ISO week from the one holding the first of last month to the one
+ * holding `today`, oldest first: the weeks the R&D view's trend lists. A
+ * week's confirmation is known where its review file was passed in (the
+ * register reads this and last week's).
+ */
+export const scopeWeeks = (today: string): string[] => {
+  const first = `${previousMonth(today.slice(0, 7))}-01`
+  const last = isoWeek(today)
+  const out: string[] = []
+  // Stepping by a week from the first in-scope day visits every ISO week once; the guard bounds a malformed date.
+  for (let d = first, i = 0; i < 12; d = addDays(d, 7), i += 1) {
+    const w = isoWeek(d)
+    if (w > last) break
+    if (out[out.length - 1] !== w) out.push(w)
+    if (w === last) break
+  }
+  if (out[out.length - 1] !== last) out.push(last)
+  return out
+}
+
+/** The claim classes in the order the R&D view's activity mix lists them. */
+export const ACTIVITY_ORDER: readonly ActivityHours['activity'][] = ['direct_research', 'direct_support', 'non_qualified', 'unclassified']
+
+/**
+ * The R&D view's figures (SPEC §6.1): per-day net and gross, the weekly
+ * trend, this week by entity, component and claim class, the flagged days and
+ * the longest days. Net is always cut from the one allocation table, so every
+ * breakdown adds up to the week total; gross is the first-to-last span of
+ * each day's admitted events (context only, never a claim basis).
+ */
+const rdFigures = (o: {
+  today: string
+  week: string
+  lastWeek: string
+  admitted: readonly UnionEvent[]
+  allocations: readonly Allocation[]
+  weekRows: readonly WeekRow[]
+  flagList: readonly Flag[]
+  reviews: ReadonlyMap<string, ReviewFile>
+  zone: string
+}) => {
+  const net = new Map<string, number>()
+  for (const a of o.allocations) add(net, a.date, a.seconds)
+  const span = new Map<string, { first: number; last: number }>()
+  for (const ev of o.admitted) {
+    if (!Number.isFinite(ev.ts)) continue
+    const date = localDate(ev.ts, o.zone)
+    const s = span.get(date)
+    if (!s) span.set(date, { first: ev.ts, last: ev.ts })
+    else {
+      s.first = Math.min(s.first, ev.ts)
+      s.last = Math.max(s.last, ev.ts)
+    }
+  }
+  const grossOf = (date: string): number => {
+    const s = span.get(date)
+    return s ? Math.floor((s.last - s.first) / 1000) : 0
+  }
+  const day = (date: string): DayFigure => ({ date, netS: net.get(date) ?? 0, grossS: grossOf(date) })
+
+  const byWeek = new Map<string, { netS: number; grossS: number }>()
+  for (const date of new Set([...net.keys(), ...span.keys()])) {
+    const w = isoWeek(date)
+    const acc = byWeek.get(w) ?? { netS: 0, grossS: 0 }
+    acc.netS += net.get(date) ?? 0
+    acc.grossS += grossOf(date)
+    byWeek.set(w, acc)
+  }
+  const weekTrend: WeekTrendRow[] = scopeWeeks(o.today)
+    .reverse()
+    .map(w => {
+      const review = o.reviews.get(w)
+      return { week: w, netS: byWeek.get(w)?.netS ?? 0, grossS: byWeek.get(w)?.grossS ?? 0, confirmed: review ? latestConfirmed(review) !== null : null }
+    })
+
+  const dates = weekDates(o.week)
+  const inWeek = new Set(dates)
+  const entities = new Map<string, number>()
+  for (const a of o.allocations) if (inWeek.has(a.date)) add(entities, SENTINELS.has(a.component) ? a.component : a.entity, a.seconds)
+  const byEntity: EntityHours[] = [...entities.entries()].map(([entity, seconds]) => ({ entity, seconds })).sort((a, b) => b.seconds - a.seconds || cmp(a.entity, b.entity))
+
+  const comps = new Map<string, { seconds: number; entities: Map<string, number>; activities: Set<Activity> }>()
+  const mix = new Map<ActivityHours['activity'], { seconds: number; poeS: number }>(ACTIVITY_ORDER.map(k => [k, { seconds: 0, poeS: 0 }]))
+  for (const r of o.weekRows) {
+    const c = comps.get(r.component) ?? { seconds: 0, entities: new Map<string, number>(), activities: new Set<Activity>() }
+    c.seconds += r.seconds
+    add(c.entities, r.entity, r.seconds)
+    if (r.seconds > 0) c.activities.add(r.activity)
+    comps.set(r.component, c)
+    const bucket = SENTINELS.has(r.component)
+    // Unmapped time has no claim class yet; ignored and non-R&D time is non-qualified by definition.
+    const cls: ActivityHours['activity'] = r.component === UNMAPPED ? 'unclassified' : bucket ? 'non_qualified' : r.activity
+    const m = mix.get(cls) as { seconds: number; poeS: number }
+    m.seconds += r.seconds
+    if (!bucket && r.poe) m.poeS += r.seconds
+  }
+  const byComponent: ComponentHours[] = [...comps.entries()]
+    .filter(([, c]) => c.seconds > 0)
+    .map(([component, c]) => {
+      const acts = [...c.activities]
+      return { component, entity: dominant(c.entities), activity: SENTINELS.has(component) ? null : acts.length === 1 ? (acts[0] as Activity) : acts.length === 0 ? null : ('mixed' as const), seconds: c.seconds }
+    })
+    .sort((a, b) => b.seconds - a.seconds || cmp(a.component, b.component))
+  const activityMix: ActivityHours[] = ACTIVITY_ORDER.map(activity => ({ activity, ...(mix.get(activity) as { seconds: number; poeS: number }) }))
+
+  const seen = new Set<string>()
+  const flaggedDays: FlaggedDay[] = []
+  for (const f of o.flagList) {
+    const key = `${f.date}|${f.kind}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    flaggedDays.push({ date: f.date, reason: f.kind, netS: net.get(f.date) ?? 0, grossS: grossOf(f.date) })
+  }
+  // Newest first; within a day the flags keep union.ts's fixed order (a stable sort).
+  flaggedDays.sort((a, b) => cmp(b.date, a.date))
+
+  const longestDays = dates
+    .map(day)
+    .filter(d => d.netS > 0)
+    .sort((a, b) => b.netS - a.netS || cmp(a.date, b.date))
+    .slice(0, 3)
+  const sumOver = (ds: readonly string[], f: (d: string) => number): number => ds.reduce((s, d) => s + f(d), 0)
+  return {
+    weekGrossS: sumOver(dates, grossOf),
+    todayGrossS: grossOf(o.today),
+    lastWeekTotalS: sumOver(weekDates(o.lastWeek), d => net.get(d) ?? 0),
+    weekTrend,
+    byEntity,
+    byComponent,
+    activityMix,
+    flaggedDays,
+    longestDays,
+  }
+}
+
+/**
  * CONTRACT (W1). The whole rollup: the current ISO week's rows (status from
  * review.ts `rowStatus`, frozen rows missing live reported as `changed` with
  * zero seconds), the queue (one row per repoRef unmapped this week, with
@@ -581,6 +717,11 @@ export const computeRollup = (input: RollupInput): Rollup => {
     rowsDropped += r.eventsDropped + r.turnsDropped + r.malformedRows
   }
 
+  const flagList = flags(blocks, segments, params, zone)
+  // This and last week always have a review (an empty one when no file exists); other weeks only when passed in.
+  const known = new Map<string, ReviewFile>([...input.reviews, [week, reviewOf(week)], [lastWeek, reviewOf(lastWeek)]])
+  const rd = rdFigures({ today, week, lastWeek, admitted, allocations, weekRows, flagList, reviews: known, zone })
+
   const summarized = summarizeSessions(segments, params, zone, input.defaultTtl)
   const shown = summarized.sessions.slice(0, SESSIONS_CAP)
   const thisSession = input.current ? (summarized.sessions.find(x => x.sessionId === input.current?.sessionId) ?? null) : null
@@ -611,7 +752,7 @@ export const computeRollup = (input: RollupInput): Rollup => {
     engineCost,
     deadlines: input.deadlines,
     reviews: [reviewStatus(reviewOf(week), changed(weekRows)), reviewStatus(reviewOf(lastWeek), changed(lastWeekRows))],
-    flags: flags(blocks, segments, params, zone),
+    flags: flagList,
     health: {
       zone,
       zoneDetectedNow: input.health.zoneDetectedNow,
@@ -634,5 +775,7 @@ export const computeRollup = (input: RollupInput): Rollup => {
     thisSessionId: thisSession?.sessionId ?? null,
     medianUsdPerHour: summarized.medianUsdPerHour,
     engineUsd: thisSession?.engineUsd ?? null,
+    ...rd,
+    entityIds: Object.keys(mapping.entities).sort(cmp),
   }
 }

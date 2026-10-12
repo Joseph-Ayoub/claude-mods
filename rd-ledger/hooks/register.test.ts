@@ -16,7 +16,7 @@ import { corpus, HINT, HOME, MODE, PANE, PYTHON, RDT_REPO, SID, SID2, STORE, T0,
 import type { World, WorldOptions } from './testing/world'
 
 const ZONE = 'America/New_York'
-const USAGE = 'Usage: /rd [session [<first 8 of a session id>] | sessions | review | spend | export [YYYY | YYYY-MM] | import]'
+const USAGE = 'Usage: /rd [usage | session [<first 8 of a session id>] | sessions | review | spend | export [YYYY | YYYY-MM] | import]'
 const SALT = 'a'.repeat(32)
 const MAPPING = {
   v: 1,
@@ -82,7 +82,7 @@ describe('open, continue and close', () => {
   test('session.start registers /rd, opens one segment and keeps its rows across a second start', async ($, on) => {
     const w = make(on)
     await start($, w)
-    expect(w.registered).toEqual(['rd'])
+    expect(w.registered).toEqual(['rd', 'spend'])
     expect(segments(w)).toEqual([`${STORE}/sessions/2026/10/${SID}.${T0.toString(36)}.json`])
     await submit($)
     await start($, w)
@@ -356,14 +356,15 @@ describe('/rd per origin', () => {
   test('where the pane cannot be placed the person gets the overview text', async ($, on) => {
     const w = make(on, { isPlaced: false })
     await start($, w)
-    expect((await rd($)).text).toMatch(/^This week /)
+    // The R&D view's header replaced the Overview's "This week" line.
+    expect((await rd($)).text).toMatch(/^R&D ledger · week of /)
     clean(w)
   })
 
   test('headless: no pane, the text answers', async ($, on) => {
     const w = make(on, { isHeadless: true })
     await start($, w)
-    expect((await rd($)).text).toMatch(/^This week /)
+    expect((await rd($)).text).toMatch(/^R&D ledger · week of /)
     expect((await rd($, 'spend')).text).toMatch(/^Spend · list-price estimate, not an invoice/)
     expect(w.opened).toEqual([])
     clean(w)
@@ -377,7 +378,7 @@ describe('the pane', () => {
     await engage($, w)
     for (const surface of ['terminal', 'desktop', 'mobile'] as const) {
       const ui = await pane($, surface)
-      expect(await ui.find({ type: 'Text', text: /^This week / })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^R&D ledger · week of / })).toBeDefined()
       await ui.press({ key: 'view-review' })
       expect(await ui.find({ type: 'Text', text: /^Review 2026-W41 · open/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: /shop#[0-9a-f]{12}/ })).toBeDefined()
@@ -411,7 +412,8 @@ describe('the pane', () => {
     expect(history).toHaveLength(1)
     expect(JSON.parse(history[0] as string).gen).toBe(4)
     expect((lastRollup(w)?.['queue'] as unknown[]).length).toBe(0)
-    expect(await ui.find({ type: 'Text', text: /2026-10-11  acme-app/ })).toBeDefined()
+    // A week row is a two-line block now: the component and entity, then the date and figures.
+    expect(await ui.find({ type: 'Text', text: /^ {2}acme-app · acme$/ })).toBeDefined()
     await ui.unmount()
     clean(w)
   })
@@ -448,7 +450,8 @@ describe('the pane', () => {
     await ui.press({ key: `act:${ROW}:support` })
     await ui.press({ key: `poe:${ROW}` })
     await w.clock.settle()
-    expect(await ui.find({ type: 'Text', text: /acme-app .* Support {2}POE {2}\[draft\]/ })).toBeDefined()
+    // The figures line of the two-line row block carries the draft marks.
+    expect(await ui.find({ type: 'Text', text: /^ {4}2026-10-11 {2}0\.33 h {2}.* Support {2}POE {2}\[draft\]$/ })).toBeDefined()
     await ui.press({ key: 'confirm' })
     await w.clock.settle()
     const file = review(w)
@@ -481,7 +484,7 @@ describe('the pane', () => {
     clean(w)
   })
 
-  test('the footer: the hourglass mark and today\'s R&D hours as a Button chip on the desktop and after the engine\'s hint on the terminal; a press opens the Overview', async ($, on) => {
+  test('the footer: the hourglass mark and today\'s R&D hours as a Button chip on the desktop and after the engine\'s hint on the terminal; a press opens the Overview beside Usage', { options: { footerChip: 'time' } }, async ($, on) => {
     const seen = recordTodayS(on)
     const w = make(on, { files: withMapping(MAPPED) })
     await start($, w)
@@ -515,7 +518,7 @@ describe('the pane', () => {
     expect(hinted?.type).toBe('Button')
     expect(hinted?.props['label']).toBe(label)
     await hint.unmount()
-    expect(w.opened).toEqual(['rd-ledger'])
+    expect(w.opened).toEqual(['rd-ledger', 'rd-usage'])
     const ui = await pane($)
     // The pane opened on the R&D tax ledger, not the Session view.
     expect(await ui.find({ type: 'Text', text: /Today/ })).toBeDefined()
@@ -524,7 +527,7 @@ describe('the pane', () => {
     clean(w)
   })
 
-  test('before any rollup exists the chip still draws, as the hourglass and --', async ($, on) => {
+  test('before any rollup exists the chip still draws, as the hourglass and -- (footerChip time)', { options: { footerChip: 'time' } }, async ($, on) => {
     const w = make(on)
     const mode = await $.ui.mount({ plugin: 'rd-ledger', surface: 'desktop', ...MODE })
     expect((await mode.find({ key: 'rd-ledger' }))?.props['label']).toBe('\u29D7--')
@@ -542,7 +545,8 @@ describe('the pane', () => {
     await hint.unmount()
     expect(w.stateSets).toContain('overview')
     expect(w.stateSets).not.toContain('session')
-    expect(w.opened).toEqual(['rd-ledger'])
+    expect(w.opened).toEqual(['rd-ledger', 'rd-usage'])
+    expect(w.openArgs.map(o => [o.id, o.focus])).toEqual([['rd-ledger', false], ['rd-usage', true]])
     clean(w)
   })
 
@@ -558,7 +562,7 @@ describe('the pane', () => {
     clean(w)
   })
 
-  test('a rollup that lacks todayS altogether draws the chip as ⧗--', async ($, on) => {
+  test('a rollup that lacks todayS altogether draws the chip as ⧗-- (footerChip time)', { options: { footerChip: 'time' } }, async ($, on) => {
     on('state.get', { plugin: 'rd-ledger', key: 'rollup' }, (_$, e, next) =>
       next(e).then(r => {
         const read = (r as { value?: { value?: unknown; version: number } }).value
@@ -605,8 +609,10 @@ describe('Compare', () => {
     await w.clock.settle()
     expect(w.asked.at(-1)).toMatch(/rd-tracker re-derives the week's proposals/)
     expect(w.argv.filter(a => a[0] === PYTHON)).toEqual([[PYTHON, '-I', '-m', 'rdt', 'review', '--json', '--week=2026-10-05']])
-    expect(await ui.find({ type: 'Text', text: '  2026-10-11  ledger 0.33 h  rd-tracker 1.00 h  Δ -0.67  ! over 10 %' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '  2026-10-10  ledger 0.00 h  rd-tracker 0.00 h  Δ 0.00' })).toBeDefined()
+    // The Compare rows are a table fitted to the pane now (Date, Ledger, rd-tracker, Δ, mark).
+    expect(await ui.find({ type: 'Text', text: /^ {2}Date +Ledger +rd-tracker +Δ$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}2026-10-11 +0\.33 +1\.00 +-0\.67 {2}! over 10 %$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}2026-10-10 +0\.00 +0\.00 +0\.00$/ })).toBeDefined()
     await ui.unmount()
     clean(w)
   })
@@ -1117,7 +1123,9 @@ describe('the Session and Sessions views', () => {
     expect((await rd($, 'session')).text).toBe('R&D ledger pane opened.')
     let ui = await pane($)
     expect(await ui.find({ type: 'Text', text: /^Session 11111111 · opened 2026-10-11 09:00 · repo shop · / })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Engaged 0\.33 h · 3 prompts/ })).toBeDefined()
+    // Headline pairs replaced the run-on engagement line.
+    expect(await ui.find({ type: 'Text', text: /^ {2}Engaged hours +0\.33$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}Prompts +3$/ })).toBeDefined()
     expect(await ui.find({ key: 'back' })).toBeUndefined()
     await ui.unmount()
     expect((await rd($, 'sessions')).text).toBe('R&D ledger pane opened.')
@@ -1268,7 +1276,7 @@ describe('paging, details on demand and an older rollup', () => {
     clean(w)
   })
 
-  test('a rollup written by older code, without the session fields, draws Reading the ledger and the chip from its own today figure, never a crash', async ($, on) => {
+  test('a rollup written by older code, without the session fields, draws Reading the ledger and the chip from its own today figure, never a crash', { options: { footerChip: 'time' } }, async ($, on) => {
     const seen = recordTodayS(on)
     // The read answers { value: { value: { shape, value: rollup }, version } }: strip the session fields from the rollup inside.
     on('state.get', { plugin: 'rd-ledger', key: 'rollup' }, (_$, e, next) =>
@@ -1315,3 +1323,162 @@ function withoutSessions(rollup: unknown): unknown {
   const { sessions: _s, details: _d, thisSessionId: _t, medianUsdPerHour: _m, engineUsd: _e, ...old } = rollup as Record<string, unknown>
   return old
 }
+
+// --- layout: every view fits the pane's width (SPEC §6) -----------------------------------------
+
+/** Every Text the pane drew, as its string, walking whatever tree drawn() returns. */
+async function drawnTexts(ui: { drawn: () => Promise<unknown> }): Promise<string[]> {
+  const out: string[] = []
+  const strings = (n: unknown): string => (typeof n === 'string' ? n : typeof n === 'number' ? String(n) : Array.isArray(n) ? n.map(strings).join('') : n && typeof n === 'object' ? strings((n as { children?: unknown }).children ?? (n as { props?: { children?: unknown } }).props?.children) : '')
+  const visit = (n: unknown): void => {
+    if (Array.isArray(n)) return n.forEach(visit)
+    if (!n || typeof n !== 'object') return
+    const node = n as { type?: unknown; children?: unknown; props?: { children?: unknown } }
+    if (node.type === 'Text') {
+      out.push(strings(node.children ?? node.props?.children))
+      return
+    }
+    visit(node.children)
+    visit(node.props?.children)
+  }
+  visit(await ui.drawn())
+  return out
+}
+/** Every Select and Input label, and every Select option label, the pane drew. */
+async function formLabels(ui: { drawn: () => Promise<unknown> }): Promise<string[]> {
+  const out: string[] = []
+  const visit = (n: unknown): void => {
+    if (Array.isArray(n)) return n.forEach(visit)
+    if (!n || typeof n !== 'object') return
+    const node = n as { type?: unknown; children?: unknown; props?: { label?: unknown; options?: unknown; children?: unknown } }
+    if (node.type === 'Select' || node.type === 'Input') {
+      if (typeof node.props?.label === 'string') out.push(node.props.label)
+      if (Array.isArray(node.props?.options)) for (const o of node.props.options as { label?: unknown }[]) if (typeof o.label === 'string') out.push(o.label)
+    }
+    visit(node.children)
+    visit(node.props?.children)
+  }
+  visit(await ui.drawn())
+  return out
+}
+const paneAt = ($: Engine, cols: number, surface: 'terminal' | 'desktop' | 'mobile' = 'desktop') => $.ui.mount({ plugin: 'rd-ledger', surface, ...PANE, props: { ...PANE.props, bodyColumns: cols } })
+const VIEWS = ['view-overview', 'view-review', 'view-spend', 'view-session', 'view-sessions'] as const
+
+describe('layout', () => {
+  test('at 24, 40, 60, 84 and 120 columns no drawn Text, Select or Input label in any view is longer than the pane, and no figure is cut', { options: RDT }, async ($, on) => {
+    const w = make(on, { files: bridged(), rdtReview: REVIEW_JSON, dirs: [`${STORE}/.lock`], dirMtimes: { [`${STORE}/.lock`]: T0 - 20 * 60_000 } })
+    await start($, w)
+    // Turns so the Spend and Session tables draw, a long note so the form wraps, then the Compare result.
+    for (let i = 0; i < 3; i += 1) {
+      await submit($)
+      await turn($, `t-${i}`, { usage: { model: 'claude-opus-5-5', input_tokens: 123_456_789, output_tokens: 98_765_432, cache_read_input_tokens: 9_876_543_210, cache_creation_input_tokens: 1_234_567_890 } })
+      await w.clock.advance(600_000)
+    }
+    await rd($, '', { kind: 'peer' })
+    await w.clock.settle()
+    const setup = await paneAt($, 40)
+    await setup.press({ key: 'view-review' })
+    await setup.press({ key: 'compare' })
+    await w.clock.settle()
+    expect(w.argv.filter(a => a[0] === PYTHON)).toHaveLength(1)
+    await setup.unmount()
+    const figure = /[0-9$%,.kM]…$/
+    for (const cols of [24, 40, 60, 84, 120]) {
+      const ui = await paneAt($, cols)
+      for (const key of VIEWS) {
+        await ui.press({ key })
+        const texts = await drawnTexts(ui)
+        expect(texts.length).toBeGreaterThan(4)
+        for (const t of texts) {
+          if ([...t].length > cols) throw new Error(`${key} at ${cols}: ${JSON.stringify(t)} is ${[...t].length} columns`)
+          if (figure.test(t)) throw new Error(`${key} at ${cols}: a figure is cut in ${JSON.stringify(t)}`)
+        }
+        for (const label of await formLabels(ui)) {
+          if ([...label].length > cols) throw new Error(`${key} at ${cols}: the form label ${JSON.stringify(label)} is ${[...label].length} columns`)
+        }
+        if (key === 'view-spend') expect(texts.some(t => /\$\d+\.\d\d$/.test(t))).toBe(true)
+        if (key === 'view-review') {
+          expect((await formLabels(ui)).length).toBeGreaterThanOrEqual(3)
+          // The Compare rows are drawn at every width with the ledger and rd-tracker figures whole.
+          expect(texts.some(t => /^ {2}(2026-)?10-11 +\d+\.\d\d +1\.00/.test(t))).toBe(true)
+        }
+      }
+      await ui.unmount()
+    }
+    clean(w)
+  })
+
+  test('the chrome is two rows: the views (R&D, Review, Spend, Session, Sessions), then the actions (Refresh, Export, Clear stale lock, Close)', async ($, on) => {
+    const w = make(on, { files: withMapping(MAPPING), dirs: [`${STORE}/.lock`], dirMtimes: { [`${STORE}/.lock`]: T0 - 20 * 60_000 } })
+    await start($, w)
+    await engage($, w)
+    const ui = await pane($)
+    const row = async (key: string) => ((await ui.find({ key })) as unknown as { children: { props: { label: string; hotkey?: string } }[] } | undefined)?.children.map(c => `${c.props.label} (${c.props.hotkey})`)
+    expect(await row('views')).toEqual(['R&D (o)', 'Review (v)', 'Spend (s)', 'Session (i)', 'Sessions (a)'])
+    expect(await row('actions')).toEqual(['Refresh (r)', 'Export (e)', 'Clear stale lock (l)', 'Close (c)'])
+    // Both rows wrap onto a further line rather than run past a narrow pane.
+    expect((await ui.find({ key: 'views' }))?.props['flexWrap']).toBe('wrap')
+    expect((await ui.find({ key: 'actions' }))?.props['flexWrap']).toBe('wrap')
+    await ui.unmount()
+    clean(w)
+  })
+
+  test('without a stale lock the actions row has no Clear stale lock button', async ($, on) => {
+    const w = make(on, { files: withMapping(MAPPING) })
+    await start($, w)
+    await engage($, w)
+    const ui = await pane($)
+    expect(await ui.find({ key: 'clear-lock' })).toBeUndefined()
+    expect(await ui.find({ key: 'refresh' })).toBeDefined()
+    await ui.unmount()
+    clean(w)
+  })
+
+  test('the R&D view draws every section title, totals, the buckets and the stale-lock warning wrapped at 40 columns', async ($, on) => {
+    const w = make(on, { files: withMapping(MAPPED), dirs: [`${STORE}/.lock`], dirMtimes: { [`${STORE}/.lock`]: T0 - 20 * 60_000 } })
+    await start($, w)
+    await engage($, w)
+    const ui = await paneAt($, 40)
+    const texts = await drawnTexts(ui)
+    for (const title of ['Hours in range', 'Weekly trend', 'Hours by entity', 'Hours by component', 'Activity mix', 'Review status', 'Spend this month', 'Pipeline', 'Deadlines']) {
+      expect(await ui.find({ type: 'Text', text: title })).toBeDefined()
+    }
+    expect(texts[0]).toMatch(/^R&D ledger · week of Oct 5 – Oct 11 ·/)
+    expect(texts.filter(t => /^ {2}Total +\d+\.\d\d/.test(t)).length).toBeGreaterThanOrEqual(4)
+    for (const bucket of ['non-R&D', 'unmapped', 'ignored']) expect(texts.some(t => new RegExp(`^ {2}${bucket} +`).test(t))).toBe(true)
+    expect(texts.some(t => /^ {2}acme +0\.33$/.test(t))).toBe(true)
+    const joined = texts.map(t => t.trim()).join(' ')
+    expect(joined).toMatch(/warning: a store lock from a crashed session is \d+ min old; saves and hand-offs wait until it is cleared with Clear stale lock \(l\)/)
+    await ui.unmount()
+    clean(w)
+  })
+
+  test('the Review view draws each week row as two lines, then its buttons; queue rows likewise', async ($, on) => {
+    const w = make(on, { files: withMapping(MAPPED) })
+    await start($, w)
+    await engage($, w)
+    const ui = await paneAt($, 60)
+    await ui.press({ key: 'view-review' })
+    const texts = await drawnTexts(ui)
+    const at = texts.indexOf('  acme-app · acme')
+    expect(at).toBeGreaterThanOrEqual(0)
+    expect(texts[at + 1]).toMatch(/^ {4}2026-10-11 {2}0\.33 h {2}pretag {2}\w+/)
+    expect(await ui.find({ key: `act:${ROW}:research` })).toBeDefined()
+    await ui.unmount()
+    clean(w)
+  })
+
+  test('the Review view draws each queue row as its key, then its hours and branches', async ($, on) => {
+    const w = make(on, { files: withMapping(MAPPING) })
+    await start($, w)
+    await engage($, w)
+    const ui = await paneAt($, 60)
+    await ui.press({ key: 'view-review' })
+    const queue = await drawnTexts(ui)
+    const q = queue.findIndex(t => /^ {2}shop#[0-9a-f]{12}$/.test(t))
+    expect(q).toBeGreaterThanOrEqual(0)
+    expect(queue[q + 1]).toMatch(/^ {4}0\.33 h · \S+$/)
+    await ui.unmount()
+    clean(w)
+  })
+})

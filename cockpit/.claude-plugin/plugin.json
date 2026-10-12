@@ -1,7 +1,7 @@
 {
   "name": "cockpit",
-  "version": "0.1.3",
-  "description": "One band above the prompt: quick replies, branch/PR/CI standing, decision cards, waiting-on-you items and standing-rule capture.",
+  "version": "0.2.0",
+  "description": "One band above the prompt: quick replies, branch/PR/CI standing, decision cards, waiting-on-you items, standing-rule capture and a Hand off chip at natural breaks.",
   "author": {
     "name": "Joseph Ayoub"
   },
@@ -36,6 +36,12 @@
       "title": "Session completion reply",
       "description": "What the Session completion button sends as your own words (no hotkey: press the button).",
       "default": "Is everything done, completed and merged on green CI in this session, and communicated back to the lead session if there is one? If so, archive this session to wrap up; or is that already done?"
+    },
+    "handoffTokens": {
+      "type": "number",
+      "title": "Offer Hand off at (tokens)",
+      "description": "The band offers Hand off (the handoff mod's /handoff) once the context passes this many tokens with the session idle (default 150000, the point where cost, latency and quality start to suffer whatever the window; 20000 to 1000000). 0 falls back to 80 % of the window.",
+      "default": 150000
     }
   }
 }

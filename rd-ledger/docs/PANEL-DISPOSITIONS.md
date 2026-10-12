@@ -52,7 +52,7 @@ canonical JSON of six fields; `a5db146c` reproduced), CYB-6 (`mv -h` exists on m
 | TES-14 | minor | adopted: pre-tag matches any branch seen that day for that repo; first rule wins | §3.3 |
 | TES-15 | minor | adopted: F3/F4 replace the vacuous property | §11 |
 | TES-16 | minor | adopted: origin list typed from the union; goldens from F1; 10:1 at equality is not heavy | §4, §11 |
-| TES-17 | minor | adopted: idempotent arming by token; joined refresh test | §6.6, §11 |
+| TES-17 | minor | adopted: idempotent arming by token; joined refresh test | §6.7 (was §6.6), §11 |
 | PRV-1 | blocker | adopted (with DBM-1): confirmed revisions freeze seconds, entity, method, params, zone, mapping digest, inputs digest; drift flagged; mapping saves logged | §3.4 |
 | PRV-2 | blocker | adopted: spend hand-off and `bridgeSpend` removed from v1 | §7, §9 |
 | PRV-3 | blocker | adopted: `--poe=1` only with a typed justification for that (component, week) | §6.2, §7 |
@@ -74,7 +74,7 @@ canonical JSON of six fields; `a5db146c` reproduced), CYB-6 (`mv -h` exists on m
 | DBM-4 | major | adopted: events written at once; turns batched | §3.1 |
 | DBM-5 | major | adopted: `seq` per row; turn key `(turnId, sha8(agentId))` | §3.1 |
 | DBM-6 | major | adopted: unknown fields kept in `extra` and written back; caps never truncate on decode; undecodable file → read-only; dropped rows counted | §3.1 |
-| DBM-7 | major | adopted: shared-file saves under the `mkdir` lock with a `gen` counter; cache key `(mtimeMs, size)` plus the racy rule | §3.3, §6.6 |
+| DBM-7 | major | adopted: shared-file saves under the `mkdir` lock with a `gen` counter; cache key `(mtimeMs, size)` plus the racy rule | §3.3, §6.7 (was §6.6) |
 | DBM-8 | major | adopted: a Select pick writes `key#hash`; a new hash under a bare key raises a row; hash input pinned; root from `$.session.repo()` | §3.3 |
 | DBM-9 | major | adopted: plan by destination; hundredths; uncertain on failure; `handedOff` derived; yearly log | §7 |
 | DBM-10 | major | adopted: `method.json`; sessions re-encoded and sorted; round-trip test | §6.4 |

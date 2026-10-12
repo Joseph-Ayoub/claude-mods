@@ -39,7 +39,7 @@ read-only), `rdt/timeline.py` (apportion 369-394, gap tie 451-469, half-open mid
 | D4 | Pricing | Bundled dated prefix table, four raw counts kept, cache-write TTL an option with dated change points, every figure labelled an estimate | ADR-004 |
 | D5 | Timezone | IANA zone frozen at first run (adopts rd-tracker's `store/timezone` when bridged); `Intl` day math with DST tests | ADR-005 |
 | D6 | Distribution | Proposal only; nothing published until Joseph says yes | ADR-006 |
-| D7 | UI | One pane with five views sharing one chrome; `/rd`, `/rd session [<id8>]`, `/rd sessions`, `/rd review`, `/rd spend` open it; `/rd export` and `/rd import` are actions | §6 |
+| D7 | UI | One pane with five views sharing one chrome; `/rd`, `/rd session [<id8>]`, `/rd sessions`, `/rd review`, `/rd spend` open it; `/rd export` and `/rd import` are actions; since 2026-10-13 a second pane, Usage (`/rd usage`, `/spend`, the one footer chip), moved in from usage-gauge | §6, §6.5, §6.6 |
 | D8 | Hashing | Pure sha256 in `hooks/hash.ts` (method hash parity with rd-tracker, manifest, salted root hash, digests); no `shasum` process | §4, §3 |
 | D9 | Method parity | The method string is rd-tracker's exact `union-v2/<sha8>` over its canonical six-field JSON; golden `a5db146c` for the canonical params in `America/New_York` | §4 |
 
@@ -72,21 +72,29 @@ data model. Verifier: Opus·xhigh over the combined diff.
 | `session.start` | register `/rd`; arm the refresh timer (idempotent by token); freeze the zone on first run; open-or-continue the record (see §3.1) | `cwd`, `surface`, `isInteractive` | — |
 | `classic.SessionStart` | open a record for `source` ∈ {`startup`, `resume`, `clear`, `fork`} under `e.session_id` (after `/clear` no `session.start` fires); `compact` is ignored | `session_id`, `source` | `session_title`, `transcript_path`, the rest |
 | `prompt.submit` | one engagement event per human submission, recorded after `await next(e)` when the result carries no `drop`; the hook's only use of `e` is `promptMeta(e)` → `{ originKind, isQueued }` | `origin.kind`, `turnId` (presence) | **`text`**, `attachments`, `context`, `wait` |
-| `turn.complete` | one usage row per turn, main loop and subagents | `turnId`, `agentId` (hashed), `durationMs`, `reason`, `usage.{model, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}` | **`answer`**, `refusal` |
-| `session.measure` | the engine's cumulative cost (`cost.usd`) | `cost`, `changed` | `context`, `rateLimits` |
+| `turn.complete` | one usage row per turn, main loop and subagents; the Usage pane's turn count and active time (§6.6) | `turnId`, `agentId` (hashed for the record; raw only to tell main from subagent), `durationMs`, `reason`, `usage.{model, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}` | **`answer`**, `refusal` |
+| `turn.step` (streaming) | one model request for the Usage pane: calls `next(e)` once and `yield*`s its chunks untouched; the bookkeeping starts after the result goes back and is never awaited, so it cannot stall the model loop | `agentId`, `model`; the result's `usage.{model, four counts}` | the chunks' content, **`answer`**, `toolUses` |
+| `tool.call` `{ tool: Edit \| Write \| NotebookEdit }` | lines added and removed for the Usage pane, after `next(e)`, result returned unchanged; `.catch` answers `next(e)` | the result's `deny`, `isError`, `staged`, `type`, `structuredPatch[].lines` (first character only), `content` (line count only) | the input, `filePath`, every other field; nothing is kept but three counts |
+| `session.measure` | the engine's cumulative cost (`cost.usd`); the Usage pane's context and rate limits | `cost`, `context.{tokens, window, percent}`, `rateLimits[].{kind, percentUsed, resetsAt}`, `changed` | — (no text field exists) |
 | `session.end` | close the record (`endedAt`, `reason`), flushed beside `next(e)` | `reason`, `sessionId` | `resume` |
 | `classic.PostModelSwitch` | a dated cache-TTL change point | `cache_ttl` | the rest |
 | `command.run` `{ command: 'rd' }` | the commands; `args` parsed as a closed word list | `command`, `args`, `origin.kind` | — |
-| `ui.render` `Pane` `rd-ledger` | the pane | — | — |
-| `ui.render` `SessionMode` (desktop) / `PromptHint` (terminal) | the footer figure (today's R&D hours) | — | — |
+| `command.run` `{ command: 'spend' }` | usage-gauge's command name, the same as `/rd usage` | `origin.kind` | `args` |
+| `ui.render` `Pane` `rd-ledger`, `rd-usage` | the two panes (§6, §6.6) | `bodyColumns` | — |
+| `ui.render` `SessionMode` (desktop) / `PromptHint` (terminal) | the one footer chip (session cost and today's R&D hours, §6.5) | — | — |
 
 `$` nouns: `session` (`id`, `cwd`, `repo`, `model`, `surfaces`, `usage`), `fs` (`read`, `write`,
 `list`, `stat`, `exists`), `process.run` (argv only; the executable is one of `/bin/mv`,
 `/bin/rm`, `/bin/mkdir`, `/bin/rmdir`, `/usr/bin/git`, `<rdtRepo>/.venv/bin/python`), `env.get`
 (`HOME`, `CLAUDE_CODE_ENTRYPOINT`, `TZ`), `clock` (`now`, `every`, `after`), `ui` (`open`,
-`close`, `resolve`, `toast`, `ask`, `log`), `command.register`, `plugin.root` (to hash the mod's
-own `union.ts` and `prices.ts` for the export), `state`. **Never:** `$.http`, `$.session.messages`,
-`$.session.append`, `$.prompt.*`, `$.model.*`, `$.ui.status`, `$.store`, `$.agent.*`.
+`close`, `panes` (is the ledger pane already open: its `id` only), `resolve`, `toast`, `ask`,
+`log`), `command.register`, `plugin.root` (to hash the mod's
+own `union.ts` and `prices.ts` for the export), `state`, `agent.list` (fields read: id, type, status;
+description never; in practice only `id` and `type` are read, once per new agent id, and
+`scripts/source-bans.py` refuses any `.description` read in the hooks).
+`session.usage` is read at start (figures) and on Usage open and Refresh (`{ breakdown: 'summary' }`,
+estimated locally). **Never:** `$.http`, `$.session.messages`, `$.session.append`, `$.prompt.*`,
+`$.model.*`, `$.ui.status`, `$.store`, any `$.agent.*` other than `list`.
 `scripts/check.sh` asserts `claude plugin validate --json` reports exactly this call list and
 exactly those three env reads.
 
@@ -117,7 +125,7 @@ cancels pending timers but keeps `$.state`.
 `HOME` from `$.env.get('HOME')` must be a plain absolute path (no `..`, no line break);
 otherwise the mod runs read-only in memory and the pane says so. Session ids are UUIDs
 (validated) before they name a file. The store or a month folder that is itself a symlink is
-reported in Data health and never written through.
+reported in the R&D view's Pipeline section and never written through.
 
 ### 3.1 Session segment (`sessions/YYYY/MM/<sessionId>.<seg>.json`)
 
@@ -250,7 +258,7 @@ with no outcome (a crash) is `uncertain` on the next read and never re-sent.
 The store **is** the record; the export is its hardcopy. Nothing is deleted except temp files
 matching `isTmpName`, older than one hour, one `rm -f <absolute path>` each, never recursive.
 Growth is bounded by the row caps (counters record drops). Back the store up off this Mac;
-Data health shows days since the last export and prompts after each closed month.
+The R&D view's Pipeline section shows days since the last export and prompts after each closed month.
 §1.6001-1(e) materiality and the 20-year §39 carryforward are the reasons.
 
 ---
@@ -315,6 +323,12 @@ tokens kept, unpriced, named. Every figure reads "list-price estimate, not an in
 engine's own `cost.usd` (own cost per segment) is shown beside it as "engine /cost figure".
 The estimate excludes the engine's side calls (compaction, titles) and says so.
 
+**The Usage pane's estimate (§6.6) is TTL-aware too**, through the same `priceRow` (one table;
+usage-gauge's copy is retired with it): each model request is priced when its `turn.step`
+settles, cache writes at the multiplier of the TTL in force at that instant (`ttlAt` over this
+process's open segment, else the `cacheTtl` option). usage-gauge priced every cache write at a
+fixed 1.25. Its footnote names the table date and this rule.
+
 ---
 
 ## 6. Commands, pane, footer
@@ -326,24 +340,87 @@ Export, import and hand-off run only for them and only when `interactive` or sur
 dismissal or any other answer cancels. Text answers (headless or non-person) carry counts,
 hours and validated ids only, never repo keys or branch names.
 
-### 6.1 `/rd` (Overview)
+### 6.0 Pane width and chrome
 
-1. **This week** (`Mon DD – Sun DD · <zone> · union-v2/<hash>`): components with entity, hours,
-   status (`pretag` / `confirmed` / `changed since confirmation`); `__unmapped__` and
-   `__ignored__` last; total; today.
-2. **Queue:** "N repositories unmapped (H.H h)" and **Review** (`v`).
-3. **Review status:** this week and last; bridge mode; rd-tracker reachability.
-4. **Spend this month:** total estimate, top three models, the estimate label; **Spend** (`s`).
-5. **Deadlines** (calendar tax year; "verify with your CPA"): per entity `filing`: C-corp 1120
-   Apr 15 / ext Oct 15; S-corp 1120-S Mar 15 / ext Sep 15; Schedule C with 1040 Apr 15 / ext
-   Oct 15; partnership 1065 Mar 15 / ext Sep 15; the next weekly review (Monday); "Form 6765
-   Section G applies to tax years beginning after 2025 unless an exemption applies (R40, R41)".
-6. **Data health:** sessions and segments in scope, unreadable files, denied events by reason,
-   redactions, dropped rows, zone (and a different detected zone), price-table date, days since
-   the last export, store symlink warning, a stale store lock (with the **Clear stale lock**
-   button, `l`), bridge status.
-7. **Session** (`i`), **Sessions** (`a`), **Overview** (`o`), **Review** (`v`), **Spend** (`s`),
-   **Refresh** (`r`), **Export** (`e`), **Close** (`c`, Esc).
+**Width.** Every view is drawn to `cols = max(24, floor(bodyColumns))`, in three tiers: wide
+≥ 84 columns, medium 60–83, narrow < 60. Invariant: no drawn `Text` line is longer than
+`cols`. Tables (`fitTable` in `report.ts`) put text columns first and figures right-aligned,
+two spaces apart, a `Total` row last where the rows sum; they drop columns by tier (named per
+view below). Still too wide, the widest text column gives up a character at a time down to
+its minimum (6, or an id column's own width; its cells cut with an ellipsis by `fit`), and
+then the next column in the table's explicit drop order goes. **A figure is never cut**: a
+figure column is drawn whole or dropped. Only when nothing is left to shrink or drop is a
+line cut to `cols`. Label/value pairs (`pairLines`, the Session view and the Usage pane) put
+the label in a column and the value right-aligned when both fit; otherwise the label on its
+own line(s) and the value under it, neither cut. Every `Select` and `Input` label and every
+option label is fitted to `cols`; static titles wrap. Free text (notes,
+recommendations, captions, warnings, errors) wraps through `wrapText(text, width, indent)`:
+the first line indented by `indent`, the rest by `indent + 2`, breaking at spaces, a word
+longer than a line split across lines, never cut. Hours read with two decimals everywhere
+(rd-tracker's `hours()`); section titles are bold; one blank line between sections. A text
+answer (headless, or no pane placed) uses the same renderers at width 100.
+
+**Chrome**, two rows so it fits a narrow pane. Views: **R&D** (`o`), **Review** (`v`),
+**Spend** (`s`), **Session** (`i`), **Sessions** (`a`). Actions: **Refresh** (`r`),
+**Export** (`e`), **Clear stale lock** (`l`, only while a stale lock is held), **Close** (`c`,
+Esc). The `view` values stay `overview | review | spend | session | sessions`; `overview` is
+the R&D view.
+
+### 6.1 `/rd` (R&D)
+
+rd-tracker's dashboard (`rdt/reports/dashboard.py`) in text, `rdLines` in `report.ts`, drawn
+from `$.state.rollup` only. Sections, in order:
+
+1. **Header:** `R&D ledger · week of <Mon DD> – <Sun DD> · <zone> · union-v2/<hash>`, wrapped.
+2. **Hours in range** (this ISO week): `Net hours` with the caption "engaged time, gaps
+   removed; the figure a claim is built from"; `Gross span` with "first to last prompt
+   each day, gaps included (context, not a claim basis)" (the first to the last admitted prompt
+   event of the local day); `Today`; then the change against
+   last week in words: `up 12.3% vs last week`, `down 3.1% vs last week`, `no change vs last
+   week`, `no prior period` (last week empty), past 999 % `up over 999% vs last week`.
+3. **Weekly trend:** `ISO week | Net hours | Gross span` for every ISO week from the one
+   holding the first of last month to this week, newest first (at most ten), `Total` footing
+   every row shown. The oldest week reads `<week> (partial)` when it starts before the first
+   of last month: only its in-scope days are counted. Narrow drops Gross span. Gross follows
+   its definition (first to last admitted event of a day), so a day of one event has gross 0
+   while its net carries the floor, and gross can read below net.
+4. **Hours by entity:** `Entity | Net hours`, largest first then by id, then the buckets as
+   rows named `non-R&D`, `unmapped`, `ignored` (always printed, zero included), `Total`. The
+   rows add up to the week's net hours.
+5. **Hours by component:** `Component | Entity | Activity | Net hours`, largest first then by
+   id, the buckets as above with entity `(none)`, `Total`. Medium drops Activity; narrow
+   drops Entity too. A component whose days carry different activities reads `mixed`.
+6. **Activity mix:** `Activity type | Net hours` over `direct_research`, `direct_support`,
+   `non_qualified`, `unclassified` (zero rows omitted), `Total`; unmapped time is
+   `unclassified`, ignored and non-R&D time `non_qualified`. Then `Process-of-experimentation
+   share: X.XX of Y.YY qualified-services hours (NN.N%)`, qualified services being research +
+   support and the share the part with POE on (`n/a` with no qualified hours).
+7. **Review status:** `<H.HH> hours in the review queue · N unmapped repo(s), M session(s)`;
+   **Unconfirmed weeks** (`<week>  unconfirmed  <hours>` for a week with time whose review is
+   not confirmed, `<week>  N row(s) changed since confirmation` for a confirmed one that
+   drifted; otherwise "Every week with recorded time is confirmed."). The refresh reads the
+   review file of every week in scope, so every unconfirmed week in scope is listed. Then **Days to
+   adjudicate** from the rollup flags, newest first, at most 8: `<date>  <reason>  <net> net ·
+   <gross> gross`, reasons `block over the 4 h cap`, `over the daily flag`, `automation swamped
+   human turns`, `rows dropped`; with no flags, **Longest days (no flags)**, this week's top
+   three. Footer: "Confirm weeks in Review (v) — hours are proposals until confirmed."
+8. **Spend this month:** `~$X est. list price · Spend (s)`.
+9. **Pipeline** (the facts Data health carried): the last refresh time, the last export (days
+   ago, or never), the bridge mode and reachability, sessions and segments in scope,
+   unreadable files, denied events by reason (the five largest), redactions, dropped rows, the
+   price-table date, the zone (and a different detected zone), the store-symlink and read-only
+   warnings, and the stale-lock warning (its button is in the actions row).
+10. **Deadlines** (calendar tax year; "verify with your CPA"): rd-tracker's six R41 rows
+    `<due>  <title> — <status>` (the date, or what an undated obligation is tied to), status
+    `N day(s) remaining`, `CLOSED N day(s) ago` or `no calendar date — see due`; then the
+    mod's own calendar rows, unchanged in data: per entity `filing` (C-corp 1120 Apr 15 / ext
+    Oct 15; S-corp 1120-S Mar 15 / ext Sep 15; Schedule C with 1040 Apr 15 / ext Oct 15;
+    partnership 1065 Mar 15 / ext Sep 15) still ahead, and the next weekly review (Monday);
+    then `Section G exemption · <entity> — unknown` per entity (the mapping records no
+    exemption); then the CPA caveat.
+
+Text answers carry counts, hours and validated ids only (CYB-13); every id, zone, method and
+reason passes a shape check and is otherwise drawn as a placeholder.
 
 ### 6.1a `/rd session [<id8>]` (Session)
 
@@ -358,6 +435,12 @@ models, the rest folded into one "N other models" row); an agents table (the mai
 up to 12 subagents by estimate, the rest folded into one "N others" row: turns, most-used
 model, tokens, estimate, share of the session's estimate); then **Recommendations** or "No
 recommendations for this session". A selected session shows **Back** to the list.
+
+Layout: the header is one line when it fits, else the id alone and one field per line; the
+figures are headline pairs (`pairLines`: a label column of 20, 14 narrow, values right-aligned
+in 12; a pair that does not fit stacks, the value under the label); the agents table drops
+Model and Tokens when narrow, then Turns and Share in that order; By model drops Turns; the
+last line and the recommendations wrap.
 
 The engine figure is `engineCostUsd` of the session's latest segment (the engine's running
 total for its most recent process, the number `/cost` prints there), less the first segment's
@@ -399,7 +482,9 @@ Every session in scope (this and last month; the rollup keeps the newest 300 as 
 subagents, cost (the engine figure, else `~` and the estimate), recommendation count; the
 median estimate per engaged hour above the table. The persisted `sessionsShown` (40, +40 per
 **More** `m`, at most 300) sets both the rows listed and the picker's options; past it the
-trailing line reads "N more — press More or /rd session <id8>". On the terminal and desktop an
+trailing line reads "N more — press More or /rd session <id8>". Hours read without a unit
+(two decimals). As the pane narrows the table drops Recs (medium), then Agents and Repo
+(narrow, where the date drops its year); the title wraps. On the terminal and desktop an
 **Open session…** `Select` opens a row in the Session view; mobile lists the rows with the
 command hint. **Sessions** button `a`.
 
@@ -418,27 +503,42 @@ Both views are addressable (`/rd session`, `/rd session <id8>`, `/rd sessions`) 
 
 ### 6.2 `/rd review` (Review)
 
-- **Unmapped repositories:** one row per `repoKey#hash` seen this week (hours, branches seen,
-  `new location?` marker); a `Select` whose options are the components, `Ignore`, and
-  `Non-R&D → <entity>` for each entity; a pick writes the mapping at once and recomputes.
-- **Week rows:** per (component, date): hours, status, buttons **Research** / **Support** /
-  **Non-R&D** / **POE on|off** (POE on refused with a toast until the note exists).
-- **Notes:** one `Input` per (component, week): what was done, what was uncertain, what was
-  tried (≤ 300). Required before POE.
+- **Unmapped repositories:** one block per `repoKey#hash` seen this week: the key, then
+  `<hours> · <branches seen>` and the `new location?` mark, wrapped; a `Select` whose options
+  are the components, `Ignore`, and `Non-R&D → <entity>` for each entity; a pick writes the
+  mapping at once and recomputes.
+- **Week rows:** per (component, date) a two-line block, `<component> · <entity>` then
+  `<date>  <H.HH> h  <status>  <activity>  <POE>  <marks>` (wrapped), then its buttons
+  **Research** / **Support** / **Non-R&D** / **POE on|off** (POE on refused with a toast until
+  the note exists).
+- **Notes:** one `Input` per (component, week) labelled `Note for <component>` (fitted), under
+  a wrapped dim prompt: what was done, what was uncertain, what was tried (≤ 300). Required
+  before POE.
 - **Other hours:** one `Input` per entity and `non_business` (0–168; blank = not entered).
 - **rd-tracker:** a **Compare** button (bridge present, mode not `off`) that runs
   `rdt review --json --week=<monday>` after a confirmation dialog stating that rd-tracker
-  re-derives the week's proposals; the result shows rd-tracker's Claude Code hours per day
-  (sum of `sessions[]` seconds where `harness` is `claude_code`) beside the mod's, rows over
-  10 % apart marked. Never runs on open or refresh.
+  re-derives the week's proposals; the result is a table fitted to the pane, `Date | Ledger |
+  rd-tracker | Δ`, rd-tracker's Claude Code hours per day (sum of `sessions[]` seconds where
+  `harness` is `claude_code`) beside the mod's, rows over 10 % apart marked `! over 10 %`.
+  Narrow (< 60) reads `Day` (MM-DD), `rdt` and `! >10 %`; past that the mark goes first, then
+  Δ; the ledger and rd-tracker figures are never cut.
+  Never runs on open or refresh.
 - **Confirm week** (`k`) writes a `confirm` revision; **Reopen** writes a `reopen` revision;
   under `source-of-truth`, Confirm asks once more and then hands off (§7).
 - Mobile has no `Select`/`Input`: the view lists rows and says to use the terminal or desktop.
+- The heading, the `components.json` problems and the error line wrap to the pane.
 
 ### 6.3 `/rd spend` (Spend)
 
-This month and last: by model (turns, four token counts, estimate), by component and entity,
-sessions, the engine figure, the TTL assumption per month, the price-table date.
+This month and last: by model (`Model | Turns | Input | Output | Cache read | Cache write |
+Est.`, token counts compact, `1.2M`), the unpriced turns per model named on a line of their
+own, by component and entity (`Component | Entity | Turns | Est.`), the engine figure, the TTL
+assumption and the price-table date. As the pane narrows the by-model table drops Cache write
+and Input (medium), then Cache read (narrow); the by-component table drops Entity (narrow);
+the two TTL footnotes wrap. Past the tiers, by model drops Cache write, Input, Cache read,
+Turns, then Output; by component drops Entity, then Turns; the estimate is never dropped or
+cut. The Usage pane's model table (§6.6) follows the same rule: Req, Input, Cache wr, Cache rd,
+Hit, Output, then Share go, never Est. $.
 
 ### 6.4 `/rd export [YYYY | YYYY-MM]`
 
@@ -466,24 +566,76 @@ name in place of `repoKey`, `rootHash` and `branch` (PRV-4). Scope: segments who
 the period (a segment crossing the boundary contributes only the rows inside it). CSV cells
 via `csvCell`. Export reads the files, never `$.state`.
 
-### 6.5 Footer
+### 6.5 Footer (the one chip)
 
-Desktop `SessionMode`: one `Button` chip `⧗2.4h`: the mark U+29D7 BLACK HOURGLASS (a
-monochrome mathematical symbol, not an emoji; the emoji hourglass is U+231B), a space, and
-today's recorded R&D hours with one decimal: `Rollup.todayS` (seconds of engaged union time
-admitted today, local day, the figure the Overview's "today" line shows) divided by 3600.
-Before the rollup exists the label is `⧗--`; a negative or non-finite figure reads `⧗0.0h`;
-from 9999.95 hours a floor `⧗9999h+`, never a clipped number. The label is at most 10
-characters, so the strip never clips it, and the mod never truncates it. It carries no cost:
-the usage-gauge mod owns the session cost in the footer (`Rollup.engineUsd` stays, for the
-Session view). One helper, `footerLabel(todayS)` in `report.ts`, draws it for both surfaces.
-Pressing it opens the pane on the Overview (§6.1), the R&D tax ledger; the Session view is one
-press away (the **Session** button `i`, `/rd session`). `footerButton` off → the same label as
-dim `Text`. Terminal `PromptHint`: the same label as a plain pressable `Button` after the
-engine's line, opening the Overview too. The figure comes from `$.state.rollup` (refreshed
-after each own turn and on the timer), never computed while drawing.
+Ruled 2026-10-13: usage-gauge's chip and Usage pane move into this mod, so the footer carries
+**one** chip from rd-ledger. Desktop `SessionMode`: one `Button` chip; terminal `PromptHint`: the
+same label as a plain pressable `Button` after the engine's line. Its label is `chipLabel` in
+`usage.ts`, by the `footerChip` option:
 
-### 6.6 Rollup and refresh
+- `both` (default): `$123 ⧗2.4h`: the session cost by the chip rule, a space, then the time part.
+- `cost`: `$123`. `time`: `⧗2.4h`.
+- **Cost part:** the engine's figure (`Usage.costUsd`, from `$.session.usage()` and
+  `session.measure`): cents under $100 (`$12.34`), whole dollars from there (`$1,234`), a floor
+  `$100k+` from $100,000; `$ --` before the first reading. Where the host keeps no cost ledger
+  the cost part is left out and the time part stands in, so the chip never vanishes.
+- **Time part:** `footerLabel(todayS)` in `report.ts`: the mark U+29D7 BLACK HOURGLASS (a
+  monochrome mathematical symbol, not an emoji; the emoji hourglass is U+231B) and
+  `Rollup.todayS / 3600` with one decimal; `⧗--` before the rollup exists; `⧗0.0h` for a negative
+  or non-finite figure; `⧗9999h+` from 9999.95 hours.
+- `chipContext` (default false) appends ` · ctx 12%` once the fill is known.
+- **At most 16 characters**, so the strip never clips it. The cost part is at most 8 (`$99,999`
+  is 7; a negative cost such as `-$99,999` is 8) and the time part at most 8 (`⧗9999.9h`), so
+  cost, space and time can reach 17: then, as when the context would pass 16, the time part
+  gives way first (while a cost remains), and if that is still too long the context gives way
+  and the time returns. No emoji.
+
+Press → `openUsageAndLedger($)`: the ledger pane first (`openPane($, 'overview')` without
+`focus`, the engine's `focus` being a request that is only ever `true`), then the Usage pane
+with `focus: true`, so Usage is the pane shown and "R&D ledger" its neighbouring tab. When
+`$.ui.panes()` already lists the ledger pane it is left as it is, its view untouched (a Review
+or Session the person was in stays); only Usage opens or takes focus.
+`footerButton` off → the same label as dim `Text` on both surfaces. The figures come from
+`$.state` (`usage` and `rollup`), never computed while drawing.
+
+### 6.6 Usage (`/rd usage`, `/spend`, the chip)
+
+A second pane, id `rd-usage`, title `Usage`, its own `ui.render` Pane hook, moved here from
+usage-gauge so it and the ledger are tabs of one pane area (panes are per plugin). Drawn from
+`$.state` only (`usage`, `breakdown`, `usageTotals`, `models`, `loops`) by `usageLines` in
+`usage.ts` to `cols` with §6.0's width model (pairs: label column 20, 14 narrow, values
+right-aligned in at least 12, a value too long for its line wrapped beneath; tables through
+`fitTable`; text through `wrapText`). Sections, in order:
+
+1. **This session:** Cost (the engine's figure; `no ledger here`, dim, where the host keeps
+   none), Session (engine start to the latest reading), Active (main-loop turn time), API (every
+   request's wall time), Turns, Requests, Agent turns (only when > 0). Durations `4s`, `8m 4s`,
+   `2h 14m`; counts `1,203`; dollars `$1,234.56` / `$ --`.
+2. **Context:** a text bar of up to 16 cells (filled, then a dim track, no hatching, no `Svg`, on
+   every surface); Window `147k of 1.0M (15%)`; Until compaction (when auto-compaction is on);
+   up to 8 category rows (used first, then free space and the buffer, dim) after a Refresh.
+3. **Rate limits:** one pair per window, `5-hour` and `23.5% · resets 3:40 PM` (local time;
+   past a day `Tue 3:40 PM`), or `none reported`.
+4. **Models:** `Model | Req | Input | Output | Cache rd | Cache wr | Hit | Est. $ | Share` and a
+   Total row (with more than one model); medium drops Req, Input and Cache wr; narrow keeps
+   Output, Est. $ and Share. Tokens `572` / `345.3k` / `152.3M`; percents with `<1%`; an unpriced
+   model reads `--` and makes the total a floor marked `+`. Then the price footnote (§5).
+5. **What's contributing:** `main loop 40% · subagents 60%` by estimate (by tokens when nothing
+   is priced), then the top five agent types.
+6. **Code changes:** `+4,321 −321 lines · 42 edits`.
+7. A caption: the per-model, per-agent and code figures count from when the mod loaded in this
+   session; the cost is the engine's own.
+8. Actions: **Refresh** (`r`, reads the summary breakdown), **R&D ledger** (`d`, opens and
+   focuses the ledger pane on its current view), **Close** (`c`, Esc).
+
+Before any reading: "Reading usage…" and the actions. **Commands:** `/rd usage` and `/spend`
+open the two panes as the chip does, for the person's own origins (§6); headless, unplaced, or
+any other origin answers one line, `Usage: $12.34 · ctx 42% · 2 requests` (counts only).
+**State:** the atoms in `PluginState['rd-ledger']` with usage-gauge's bounds (50 models, 50
+agent types, 500 agent ids; any more fold into `other` or drop the oldest) and shape tags; a hot
+reload keeps them; nothing of them is written to disk.
+
+### 6.7 Rollup and refresh
 
 `rollup.ts` is pure: `computeRollup(input)` over decoded segments. The register keeps a cache
 `path → { record, mtimeMs, size }` and re-reads a file when `(mtimeMs, size)` changed or when
@@ -514,7 +666,7 @@ target hours in whole hundredths; a destination with a `sent` line at the same h
 skipped; a different amount → `needs-manual-adjust` (never a second `add`); any `uncertain`
 blocks the destination until the person clears it in the log. Execution: take the `.lock`
 (`mkdir`; a lock is never taken over by code, since two takeovers can both succeed: one
-older than 15 minutes is shown in Data health and the Overview offers **Clear stale lock**,
+older than 15 minutes is shown in the R&D view's Pipeline section and the pane offers **Clear stale lock**,
 confirmed, one `rmdir`), at most 12 destinations per Confirm and at most 10 minutes of
 sending (the rest on the next Confirm), each: re-read the log and
 re-plan that destination (a line another session wrote meanwhile stops it), write the
@@ -564,6 +716,20 @@ The right form is a `claude_code_live` source parser in rd-tracker (§13).
 | Python import runs foreign code | `-I`, cwd = store, `safe_load` literal | T-S8 |
 | Timezone or pricing drift | frozen zone; dated table; raw counts kept; detected zone reported | T-D4, T-D5 |
 
+**The Usage surface (2026-10-13).** Three observers and one call were added for §6.6. The
+`turn.step` hook sits on the model's stream: a bug there could cut or stall the stream, so it
+only passes through: it calls `next(e)` exactly once, `yield*`s every chunk unchanged, does
+nothing before that can throw (the clock read is guarded), and counts after the stream ended
+inside a try (T-U1). The `tool.call` hook on Edit, Write and NotebookEdit runs the tool once
+beneath, returns its result unchanged, never denies, and its `.catch` answers `next(e)`
+(replay-safe); it keeps three counts from the result (lines added, removed, one edit) and never
+the path, the input or a line of text (T-U2). `session.measure` adds numbers and window kinds
+(one line, ≤ 24) to the state. `$.agent.list()` is read for `id` and `type` only; an entry's
+`description` is the Agent call's task text and is never read (a source ban on `.description`,
+and a sentinel test that a planted description reaches no state, file, pane or answer, T-U3).
+The agent type is drawn in the pane through `oneLine` (≤ 24), and the text answers carry
+counts only. None of it is written to disk.
+
 Data minimization: session id, segment, sequence numbers, repo and cwd basenames (`~`/`root`
 placeholders), branch, model id, origin kind, entrypoint word, timestamps, token counts,
 salted root hash. No user name, email, path, title, or stderr.
@@ -574,7 +740,9 @@ salted root hash. No user name, email, path, title, or stderr.
 
 | Option | Type | Default | Observable (the test pair) |
 |---|---|---|---|
-| `footerButton` | boolean | true | Button vs Text (`⧗<hours>h`) in the footer |
+| `footerButton` | boolean | true | Button vs Text in the footer; the press opens the ledger, then Usage focused |
+| `footerChip` | `both` / `cost` / `time` | `both` | `$12.34 ⧗0.3h` / `$12.34` / `⧗0.3h`; an unknown value reads `both` |
+| `chipContext` | boolean | false | ` · ctx 42%` appended, within 16 characters |
 | `refreshMinutes` | number 1–60 | 5 | refresh count after advancing N minutes |
 | `idleGapMinutes` | number 5–120 | 30 | the merge result and the method hash |
 | `cacheTtl` | `5m` / `1h` | `5m` | ×1.25 vs ×2.0 |
@@ -606,11 +774,12 @@ mods/rd-ledger/
 ├── hooks/prices.ts                     table, priceTurn, spend rows                         (W1)
 ├── hooks/rollup.ts                     computeRollup, summarizeSessions, recommendation rules (W1)
 ├── hooks/report.ts                     text answers, footer label, session views, log pages (W3)
+├── hooks/usage.ts                      the Usage pane: accounting, formats, chip label, usageLines (B2, from usage-gauge)
 ├── hooks/exporter.ts                   export file set, DICTIONARY, method.json             (W3)
 ├── hooks/bridge.ts                     discovery, argv, plan, log, parsers                  (W4)
 ├── hooks/testing/world.ts              the shared fake engine beneath the plugin            (lead)
 ├── hooks/fixtures/ground-truth.ts      F1–F4 events and expected tables                     (lead)
-├── hooks/*.test.ts                     per module; register.test.ts (W3 + W5)
+├── hooks/*.test.ts                     per module; register.test.ts (W3 + W5); usage.test.ts, usage-pane.test.ts (B2)
 ├── scripts/check.sh                    validate --json allowlist + source bans              (lead)
 ├── types/index.d.ts                    the contract                                         (lead)
 ├── SPEC.md, docs/, README.md
@@ -678,7 +847,17 @@ source; not restated here).
     segment reports oversize at the first 250-row boundary past 3 MiB and that the segment just
     before that boundary is under 4 MiB; a 4 MiB+ file is counted unreadable and never rewritten.
 13. **`scripts/check.sh`:** `claude plugin validate --json` calls and env reads equal the
-    allowlist; source bans; `claude plugin test` green.
+    allowlist; source bans (including `.description`); `claude plugin test` green.
+15. **Usage (`usage.test.ts`, `usage-pane.test.ts`):** usage-gauge's figure formats, patch
+    counting, model lines and shares, rate-limit text and the context line; the estimate at
+    1.25× and 2× cache writes, the `cacheTtl` option and a TTL change point mid-session; the chip
+    per `footerChip` × `chipContext` × cost × hours never past 16 characters and without emoji;
+    the press opening `rd-ledger` (no focus) then `rd-usage` (focus), in that order; `/rd usage`
+    and `/spend` per origin, headless and unplaced; the R&D ledger button; the stream hook passing
+    chunks and result through unchanged with one call beneath (T-U1); an Edit counted, the
+    refused one not, no path or line in any state, file or answer (T-U2); a sentinel agent
+    description absent everywhere (T-U3); the pane at 40/60/84/120 columns on desktop, terminal
+    and mobile with no Text longer than the pane; a hot reload keeping the accumulators.
 
 ---
 

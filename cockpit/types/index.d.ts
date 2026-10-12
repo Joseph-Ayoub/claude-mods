@@ -60,11 +60,21 @@ export type CockpitStanding = {
 }
 
 /**
- * What the host told the band: whether the app's archive tool is listed, and the parent (lead)
- * session. `leadState` is `unknown` until the app's record was read once; a later failed read
- * never clears a lead it knew.
+ * What the host told the band: whether the app's archive tool is listed, the parent (lead)
+ * session, and whether the handoff mod's `/handoff` command is listed. `leadState` is `unknown`
+ * until the app's record was read once; a later failed read never clears a lead it knew.
+ * `handoffCommand` is absent in state saved by cockpit 0.1.x: read it as false.
  */
-export type CockpitHost = { archiveTool: boolean; lead: string | null; leadState: 'unknown' | 'none' | 'known' }
+export type CockpitHost = { archiveTool: boolean; lead: string | null; leadState: 'unknown' | 'none' | 'known'; handoffCommand: boolean }
+
+/**
+ * The live context window as last measured (`session.measure`, or `$.session.usage()` after a
+ * main-loop turn): `tokens` the fill, null until a response reported one (and after /clear);
+ * `window` the model's window, null when unknown; `startedAt` when the session these figures count
+ * from began (`$.session.usage().startedAt`, which /clear starts over), null until read and set back to null by a /clear until read again. Absolute
+ * tokens drive the Hand off chip; `startedAt` keeps a merge from before the session from being a break.
+ */
+export type CockpitContext = { tokens: number | null; window: number | null; at: number; startedAt: number | null }
 
 /**
  * Background work an archive would drop, as last observed after the latest turn; null until then.
@@ -117,6 +127,8 @@ declare module 'claude-code' {
       lastReportAt: number
       background: CockpitBackground | null
       host: CockpitHost
+      /** The context window's fill as last measured; null until the first reading. */
+      context: CockpitContext | null
     }
   }
 }

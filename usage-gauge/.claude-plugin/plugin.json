@@ -1,7 +1,7 @@
 {
   "name": "usage-gauge",
   "version": "0.1.4",
-  "description": "A live cost chip in the prompt footer and a /spend Usage pane: the session's cost, context by category, rate limits, tokens and cache hit per model, subagent share and code changes, without /usage landing in the transcript.",
+  "description": "(superseded by rd-ledger) A live cost chip in the prompt footer and a /spend Usage pane: the session's cost, context by category, rate limits, tokens and cache hit per model, subagent share and code changes, without /usage landing in the transcript.",
   "author": {
     "name": "Joseph Ayoub"
   },

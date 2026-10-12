@@ -1,7 +1,8 @@
-// The Hand off button's pure half: the prompt the fork answers, the note's
-// cleaning and redaction, and where the note lands. register.tsx does the
-// calls ($.model.fork, $.fs.write, /clear, the prompt fill); everything here is
-// testable without an engine.
+// /handoff's pure half: the prompt the fork answers, the note's cleaning and
+// redaction, and where the note lands. register.ts does the calls
+// ($.model.fork, $.fs.write, /clear, the prompt fill); everything here is
+// testable without an engine. Moved unchanged from mem-gauge 0.2.1, so the
+// note's format and path are the same as before.
 
 /**
  * What the one model call is asked: a note a fresh session can start from
@@ -40,7 +41,7 @@ export const CUT_MARKER = '… (cut)'
  * C0/C1 controls go, CRLF and lone CR become line ends, line and paragraph
  * separators become `\n`, and format characters (bidi overrides, zero-width,
  * Unicode tags), lone surrogates and private-use code points are dropped, the
- * same classes parse.ts `oneLine` drops from one-line text.
+ * same classes register.ts `oneLine` drops from one-line text.
  */
 export function cleanNote(text: string): string {
   return text
@@ -129,7 +130,7 @@ const pad = (n: number, width = 2): string => String(n).padStart(width, '0')
  * `<home>/.claude/handoffs/<yyyy-mm-dd-HHmmss>-<repoKey>-<id8>.md`, the time in
  * UTC to the second (the same clock as the header's ISO stamp, the same name on
  * any machine, and a second hand-off a moment later never overwrites the first).
- * `home` is the checked HOME (advice.ts `applyHome`); the id is the engine's
+ * `home` is the checked HOME (register.ts `applyHome`); the id is the engine's
  * session id, cut to its first 8 safe characters.
  */
 export function handoffPath(home: string, label: string, sessionId: string, now: number): string {

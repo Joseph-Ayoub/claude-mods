@@ -20,16 +20,16 @@
 // transcript: `promptMeta(e)` is prompt.submit's only reading of its event.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, SessionUsageArgs, TurnStepResult } from 'claude-code'
 
 import type { Activity, BridgeInfo, BridgeLogEntry, BridgeLogKind, HandoffEntry, Mapping, QueueDecision, RecordSource, ReviewRevision, Rollup, SessionRecord, SessionSummary, UnionEvent, UnionParams, View, WeekRow } from '../types'
 import { addArgv, argvForLog, bridgeLine, compareArgv, detectBridge, importArgv, parseAddLine, parseBridgeLog, parseCompareJson, parseImportJson, planHandoff } from './bridge'
 import { buildExport, EXPORT_FILES, manifestText } from './exporter'
 import { sha256 } from './hash'
 import { applyQueueDecision, deadlines, historyLine, loadMapping, mappingDigest, mergeImport, saveMapping } from './mapping'
-import { dayNumber, footerLabel, overviewText, SESSIONS_SHOWN, SESSIONS_SHOWN_MAX, sessionOptions, sessionsText, sessionText, shownRows, spendText, summaryLine } from './report'
+import { dayNumber, fit, fitTable, overviewText, rdLines, SESSIONS_SHOWN, SESSIONS_SHOWN_MAX, sessionOptions, sessionsText, sessionText, shownRows, spendText, summaryLine, wrapText } from './report'
 import { buildConfirm, buildReopen, encodeReview, inputsDigest, latestConfirmed, latestRevision, loadReview, parseOtherHours } from './review'
-import { computeRollup } from './rollup'
+import { computeRollup, scopeWeeks } from './rollup'
 import {
   CAP,
   DEFAULT_PARAMS,
@@ -66,11 +66,32 @@ import {
   withCost,
   withEvent,
   withTurn,
- isOversize, withSurface } from './store'
+ isOversize, ttlAt, withSurface } from './store'
 import type { TurnInput } from './store'
 import { cleanBranch, cleanField, hasOwn, hoursText, isMonth, isSessionId, isWeek, oneLine, repoKeyOf } from './text'
 import { addDays, detectZone, isoWeek, isoWithOffset, isZone, localDate, monthOfTs, previousMonth, weekDates, weekOfTs, zoneFromLocaltimeTarget } from './tz'
 import { allocate, buildBlocks, methodString, segmentKey } from './union'
+import type { ChipMode, UsageView } from './usage'
+import {
+  MAX_AGENT_IDS,
+  MAX_AGENT_TYPES,
+  MAX_MODELS,
+  UCAP,
+  addRequest,
+  boundedKey,
+  breakdownFrom,
+  chipLabel,
+  countPatch,
+  emptyCounts,
+  emptyTotals,
+  estimateUsd,
+  keepLatest,
+  ownGet,
+  unknownUsage,
+  usageFrom,
+  usageLines,
+  usageSummaryLine,
+} from './usage'
 
 type Dollar = EngineInterface
 type BridgeMode = 'corroborate' | 'source-of-truth' | 'off'
@@ -80,7 +101,7 @@ type Stat = { kind: string; size: number; mtimeMs: number; isLink: boolean; real
 // validate` holds them to types/index.d.ts. Written from handlers, timers and
 // events, never while drawing.
 // Shape-tagged: a reload of code whose rollup lacks the session fields reads the old value as absent (verifier V2).
-const rollupRef = atom({ plugin: 'rd-ledger', key: 'rollup' } as const, null as Rollup | null, { shape: 'rollup-sessions-v2' })
+const rollupRef = atom({ plugin: 'rd-ledger', key: 'rollup' } as const, null as Rollup | null, { shape: 'rollup-rd-v3' })
 const viewRef = atom({ plugin: 'rd-ledger', key: 'view' } as const, 'overview' as View)
 const selectedSessionRef = atom({ plugin: 'rd-ledger', key: 'selectedSession' } as const, null as string | null)
 const sessionsShownRef = atom({ plugin: 'rd-ledger', key: 'sessionsShown' } as const, SESSIONS_SHOWN)
@@ -92,11 +113,23 @@ const draftOtherHoursRef = atom({ plugin: 'rd-ledger', key: 'draftOtherHours' } 
 const recordPathRef = atom({ plugin: 'rd-ledger', key: 'recordPath' } as const, null as string | null)
 const armTokenRef = atom({ plugin: 'rd-ledger', key: 'armToken' } as const, null as string | null)
 const compareRef = atom({ plugin: 'rd-ledger', key: 'compare' } as const, null)
+// The Usage pane's figures (SPEC §6.6), shape-tagged so a reload of another
+// build's value reads as the initial one rather than a value missing fields.
+const usageRef = atom({ plugin: 'rd-ledger', key: 'usage' } as const, null, { shape: 'usage-v1' })
+const breakdownRef = atom({ plugin: 'rd-ledger', key: 'breakdown' } as const, null, { shape: 'breakdown-v1' })
+const usageTotalsRef = atom({ plugin: 'rd-ledger', key: 'usageTotals' } as const, emptyTotals(), { shape: 'usage-totals-v1' })
+const modelsRef = atom({ plugin: 'rd-ledger', key: 'models' } as const, {}, { shape: 'usage-models-v1' })
+const loopsRef = atom({ plugin: 'rd-ledger', key: 'loops' } as const, { main: emptyCounts(), agents: {} }, { shape: 'usage-loops-v1' })
+const agentTypesRef = atom({ plugin: 'rd-ledger', key: 'agentTypes' } as const, {} as Record<string, string>)
+const usageRefreshingRef = atom({ plugin: 'rd-ledger', key: 'usageRefreshing' } as const, false)
 
 const PANE = 'rd-ledger'
 const PANE_TITLE = 'R&D ledger'
+/** The Usage pane: a second pane of this mod, so the engine draws it and the ledger as tabs of one pane area. */
+const USAGE_PANE = 'rd-usage'
+const USAGE_TITLE = 'Usage'
 /** The version printed in the export; kept equal to .claude-plugin/plugin.json. */
-const MOD_VERSION = '0.1.0'
+const MOD_VERSION = '0.2.0'
 const ADMISSION_VERSION = 'admission-v1'
 /** Turns, branch changes and cost figures coalesce into one flush this long after the first mark. */
 const FLUSH_MS = 500
@@ -108,7 +141,7 @@ const RDT_TIMEOUT_MS = 60_000
 const TURN_REFRESH_MS = 5000
 /** The pane re-reads on open when its rollup is older than this. */
 const STALE_MS = 60_000
-/** A lock older than this counts as stale: it is reported in Data health and the person clears it; the code never takes a lock over (verifier V10). */
+/** A lock older than this counts as stale: it is reported in the R&D view's Pipeline section and the person clears it; the code never takes a lock over (verifier V10). */
 const LOCK_STALE_MS = 15 * 60_000
 /** Destinations sent per Confirm; the rest go on the next Confirm. */
 const MAX_HANDOFF_PER_CONFIRM = 12
@@ -129,12 +162,12 @@ const COMPARE = 'Compare'
 const HAND_OFF = 'Hand off'
 const CLEAR_LOCK = 'Clear lock'
 const CANCEL = 'Cancel'
-const USAGE = 'Usage: /rd [session [<first 8 of a session id>] | sessions | review | spend | export [YYYY | YYYY-MM] | import]'
+const USAGE = 'Usage: /rd [usage | session [<first 8 of a session id>] | sessions | review | spend | export [YYYY | YYYY-MM] | import]'
 const BUCKETS: ReadonlySet<string> = new Set([UNMAPPED, IGNORED, NON_RD])
 const STORE_LABEL = '~/.claude/rd-ledger'
 const ACTIVITY_LABEL: Record<Activity, string> = { direct_research: 'Research', direct_support: 'Support', non_qualified: 'Non-R&D' }
 
-type Config = { refreshMs: number; params: UnionParams; cacheTtl: '5m' | '1h'; rdtRepo: string; bridgeMode: BridgeMode; personLabel: string; footerButton: boolean }
+type Config = { refreshMs: number; params: UnionParams; cacheTtl: '5m' | '1h'; rdtRepo: string; bridgeMode: BridgeMode; personLabel: string; footerButton: boolean; footerChip: ChipMode; chipContext: boolean }
 type Boot = { home: string | null; zone: string; salt: string | null; storeIsLink: boolean; surface: string | null; interactive: boolean }
 type Known = { mapping: Mapping; mappingText: string | null; problems: string[]; mappingReadOnly: boolean; segments: SessionRecord[]; bridge: BridgeInfo }
 
@@ -149,6 +182,8 @@ let config: Config = {
   bridgeMode: 'corroborate',
   personLabel: '',
   footerButton: true,
+  footerChip: 'both',
+  chipContext: false,
 }
 let boot: Boot | null = null
 let homeCache: string | null | undefined
@@ -438,7 +473,7 @@ async function bootStore($: Dollar, start: { surface: string | null; interactive
   const now = await $.clock.now()
   const home = await homeOf($)
   const storeIsLink = home ? (await statOf($, storeDir(home), true))?.isLink === true : false
-  // Data health reports a linked store; the boot writes nothing through it.
+  // The R&D view's Pipeline section reports a linked store; the boot writes nothing through it.
   boot = { home, zone: boot?.zone ?? 'UTC', salt: null, storeIsLink, surface: start?.surface ?? boot?.surface ?? null, interactive: start?.interactive ?? boot?.interactive ?? false }
   // Temp names carry a serial; seeding it from the clock keeps them unique across a hot reload (verifier V8).
   if (writeSerial === 0) writeSerial = now % 1_000_000_000
@@ -718,7 +753,8 @@ async function refreshOnce($: Dollar): Promise<void> {
   const mappingText = b.home ? await readText($, mappingPath(b.home)) : null
   const loaded = loadMapping(mappingText)
   const today = localDate(now, b.zone)
-  const weeks = [isoWeek(today), isoWeek(addDays(today, -7))]
+  // Every week the R&D view's trend lists (this and last week among them), so each one's confirmation is known.
+  const weeks = scopeWeeks(today)
   const reviews = new Map(await Promise.all(weeks.map(async w => [w, loadReview(b.home ? await readText($, reviewPath(b.home, w)) : null, w).review] as const)))
   const bridge = await bridgeInfoOf($)
   if (boot && boot.salt === null && b.home && !b.storeIsLink) {
@@ -843,14 +879,183 @@ async function todayFigure($: Dollar): Promise<number | null> {
   return rollup && typeof rollup.todayS === 'number' ? rollup.todayS : null
 }
 
-/** Opens the pane; `selected` (when given) is the session the Session view shows, null for this process's own. */
-async function openPane($: Dollar, view: View | null, selected?: string | null) {
+/**
+ * Opens the pane; `selected` (when given) is the session the Session view
+ * shows, null for this process's own. `focus: false` opens it without asking
+ * for the keyboard (the engine's `focus` is a request that is only ever
+ * `true`, so the key is left out), as the chip does when Usage follows it.
+ */
+async function openPane($: Dollar, view: View | null, selected?: string | null, opts: { focus: boolean } = { focus: true }) {
   if (selected !== undefined) await update($, selectedSessionRef, () => selected)
   if (view) await update($, viewRef, () => view)
-  const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true })
+  const opened = await $.ui.open(opts.focus ? { id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true } : { id: PANE, title: PANE_TITLE, closeOnEscape: true })
   const r = await read($, rollupRef).catch(() => null)
   if (!r || (await $.clock.now()) - r.at > STALE_MS) void refresh($)
   return opened
+}
+
+// --- the Usage pane (SPEC §6.6) ----------------------------------------------------------
+
+/**
+ * Reads the session's usage figures (and, with `breakdown`, the window by
+ * category) into $.state. A refused read leaves every figure unknown rather
+ * than absent, so the pane draws `--` instead of waiting forever.
+ */
+async function readUsage($: Dollar, args?: SessionUsageArgs): Promise<void> {
+  const now = await $.clock.now()
+  let reading
+  try {
+    reading = await $.session.usage(args)
+  } catch {
+    await update($, usageRef, prev => prev ?? unknownUsage(now))
+    return
+  }
+  await update($, usageRef, prev => usageFrom(reading, prev, now, true))
+  if (args?.breakdown) await update($, breakdownRef, () => breakdownFrom(reading.context.breakdown))
+}
+
+/** Usage open and its Refresh: the figures and the summary breakdown (estimated locally, nothing is sent). */
+async function refreshUsage($: Dollar, columns?: number): Promise<void> {
+  if (await read($, usageRefreshingRef)) return
+  await update($, usageRefreshingRef, () => true)
+  try {
+    await readUsage($, columns === undefined ? { breakdown: 'summary' } : { breakdown: 'summary', columns })
+  } finally {
+    await update($, usageRefreshingRef, () => false).catch(() => undefined)
+  }
+}
+
+/** Opens the Usage pane, focused, and reads the breakdown behind it. */
+async function openUsagePane($: Dollar) {
+  const opened = await $.ui.open({ id: USAGE_PANE, title: USAGE_TITLE, focus: true, closeOnEscape: true })
+  if (opened.isPlaced) void refreshUsage($).catch(() => undefined)
+  return opened
+}
+
+/**
+ * The chip's press, `/rd usage` and `/spend`: the R&D ledger first, without
+ * the keyboard, then Usage, focused, so Usage is the pane shown and "R&D
+ * ledger" is the tab beside it (the engine draws one pane per id, one shown,
+ * the rest tabs). Answers whether Usage was placed.
+ */
+async function openUsageAndLedger($: Dollar): Promise<boolean> {
+  // An open ledger keeps its view (a Review or Session the person is in): only Usage opens or takes focus.
+  const panes = await $.ui.panes().catch(() => [] as readonly { id: string }[])
+  if (!panes.some(p => p.id === PANE)) await openPane($, 'overview', undefined, { focus: false }).catch(() => undefined)
+  return (await openUsagePane($)).isPlaced
+}
+
+/**
+ * The type an agent id was spawned as, looked up once and remembered; `agent`
+ * when it is not listed. `$.agent.list()` is read for each entry's `id` and
+ * `type` only: the task description an entry carries is never read (a source
+ * ban holds that), so no task text reaches the state.
+ */
+async function agentTypeOf($: Dollar, agentId: string): Promise<string> {
+  const id = agentId.slice(0, 128)
+  const known = ownGet(await read($, agentTypesRef), id)
+  if (known !== undefined) return known
+  let type = 'agent'
+  try {
+    for (const entry of await $.agent.list()) {
+      if (entry.id !== agentId) continue
+      if (typeof entry.type === 'string') type = oneLine(entry.type, UCAP.agentType) || 'agent'
+      break
+    }
+  } catch {
+    // Unknown stays `agent`; it is remembered so the list is not asked again for it.
+  }
+  await update($, agentTypesRef, m => keepLatest({ ...m, [id]: type }, MAX_AGENT_IDS))
+  return type
+}
+
+/** One model request, counted under its model and its loop, priced at the cache TTL in force now. */
+async function recordStep($: Dollar, agentId: string | undefined, model: string, r: TurnStepResult | undefined, t0: number | null): Promise<void> {
+  const now = await $.clock.now()
+  const apiMs = t0 === null ? 0 : Math.max(0, now - t0)
+  const usage = r?.usage ?? null
+  const rawModel = typeof usage?.model === 'string' && usage.model ? usage.model : typeof model === 'string' ? model : ''
+  const counts = usage
+    ? { input: usage.input_tokens, output: usage.output_tokens, cacheRead: usage.cache_read_input_tokens, cacheWrite: usage.cache_creation_input_tokens }
+    : null
+  const ttl = (current ? ttlAt(current, now) : null) ?? config.cacheTtl
+  // A request with no usage (failed, interrupted) has no tokens to price.
+  const est = counts ? estimateUsd(rawModel, counts, ttl) : 0
+  const modelKey = oneLine(rawModel, UCAP.model) || 'unknown'
+  const type = agentId === undefined ? null : await agentTypeOf($, agentId)
+  await update($, modelsRef, m => {
+    const key = boundedKey(m, modelKey, MAX_MODELS)
+    return { ...m, [key]: addRequest(ownGet(m, key), counts, apiMs, est) }
+  })
+  await update($, loopsRef, l => {
+    if (type === null) return { ...l, main: addRequest(l.main, counts, apiMs, est) }
+    const key = boundedKey(l.agents, type, MAX_AGENT_TYPES)
+    return { ...l, agents: { ...l.agents, [key]: addRequest(ownGet(l.agents, key), counts, apiMs, est) } }
+  })
+  await update($, usageTotalsRef, t => ({ ...t, loadedAt: t.loadedAt || now, updatedAt: now, requests: t.requests + 1, apiMs: t.apiMs + apiMs }))
+}
+
+/** A turn's end: the main loop's count and wall time, or a subagent's count. */
+async function recordUsageTurn($: Dollar, agentId: string | undefined, durationMs: number): Promise<void> {
+  const now = await $.clock.now()
+  const ms = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0
+  await update($, usageTotalsRef, t =>
+    agentId === undefined
+      ? { ...t, loadedAt: t.loadedAt || now, updatedAt: now, turns: t.turns + 1, activeMs: t.activeMs + ms }
+      : { ...t, loadedAt: t.loadedAt || now, updatedAt: now, agentTurns: t.agentTurns + 1 },
+  )
+}
+
+/** An Edit / Write / NotebookEdit result's line counts; a denied or failed call counts nothing. No path or text is kept. */
+async function recordEdit($: Dollar, ran: unknown): Promise<void> {
+  const counted = countPatch(ran)
+  if (!counted) return
+  const now = await $.clock.now()
+  await update($, usageTotalsRef, t => ({
+    ...t,
+    loadedAt: t.loadedAt || now,
+    updatedAt: now,
+    linesAdded: t.linesAdded + counted.added,
+    linesRemoved: t.linesRemoved + counted.removed,
+    edits: t.edits + 1,
+  }))
+}
+
+/** Everything the Usage pane and its text answer draw. */
+async function readUsageView($: Dollar): Promise<UsageView> {
+  return {
+    usage: await read($, usageRef),
+    breakdown: await read($, breakdownRef),
+    totals: await read($, usageTotalsRef),
+    models: await read($, modelsRef),
+    loops: await read($, loopsRef),
+  }
+}
+
+/** The footer chip's label from the state alone: the session cost and today's R&D hours by the footerChip option. */
+async function chipText($: Dollar): Promise<string> {
+  const usage = config.footerChip === 'time' && !config.chipContext ? null : await read($, usageRef)
+  return chipLabel(usage, await todayFigure($), config.footerChip, config.chipContext)
+}
+
+/**
+ * `/rd usage` and `/spend`: the person's own origins open Usage beside the
+ * ledger; headless, unplaced, or any other origin gets the one summary line
+ * (counts only).
+ */
+async function runUsageCommand($: Dollar, originKind: string): Promise<string> {
+  const surfaces = await $.session.surfaces().catch(() => [] as readonly string[])
+  const surfaceNow = await learnSurface($, surfaces[0] ?? null)
+  if (surfaces.length > 0 && isPersonOrigin(originKind, surfaceNow)) {
+    let isPlaced = false
+    try {
+      isPlaced = await openUsageAndLedger($)
+    } catch {
+      isPlaced = false
+    }
+    if (isPlaced) return 'Usage pane opened.'
+  }
+  return usageSummaryLine(await readUsageView($))
 }
 
 // --- mapping saves -----------------------------------------------------------------------
@@ -1382,6 +1587,7 @@ async function runCommand($: Dollar, args: string, originKind: string): Promise<
   const surfaceNow = await learnSurface($, surfaces[0] ?? null)
   const isPerson = isPersonOrigin(originKind, surfaceNow)
   const mayAct = isPerson && (b.interactive || surfaceNow === 'desktop')
+  if (sub === 'usage') return words.length > 1 ? USAGE : runUsageCommand($, originKind)
   if (sub === 'overview' || sub === 'review' || sub === 'spend') {
     const view: View = sub
     const rollup = await freshRollup($)
@@ -1459,6 +1665,8 @@ export const register: Register = (on, options) => {
     bridgeMode: mode === 'source-of-truth' || mode === 'off' ? mode : 'corroborate',
     personLabel: typeof options['personLabel'] === 'string' ? oneLine(options['personLabel'], 80) : '',
     footerButton: options['footerButton'] !== false,
+    footerChip: options['footerChip'] === 'cost' || options['footerChip'] === 'time' ? options['footerChip'] : 'both',
+    chipContext: options['chipContext'] === true,
   }
   boot = null
   homeCache = undefined
@@ -1486,12 +1694,27 @@ export const register: Register = (on, options) => {
       $.ui.log(`rd-ledger: /rd not registered (${kindOf(err)})`, { to: 'debug' })
     }
     try {
+      // usage-gauge's command name, kept for continuity now that its pane lives here.
+      await $.command.register({ name: 'spend', description: 'Open the Usage pane (with the R&D ledger as its neighbouring tab)', immediate: true })
+    } catch (err) {
+      $.ui.log(`rd-ledger: /spend not registered (${kindOf(err)})`, { to: 'debug' })
+    }
+    try {
+      const now = await $.clock.now()
+      // A reload (or a second start) keeps the accumulators and when they began; no Refresh is in flight after a load.
+      await update($, usageTotalsRef, t => (t.loadedAt > 0 ? t : { ...t, loadedAt: now, updatedAt: Math.max(t.updatedAt, now) }))
+      await update($, usageRefreshingRef, () => false)
+    } catch {
+      // Observing only.
+    }
+    try {
       await bootStore($, { surface: typeof e.surface === 'string' ? e.surface : null, interactive: e.isInteractive === true })
       await serial(() => openOrContinue($))
       await arm($)
       // The branch and the first rollup run once the start has settled, never holding up the first prompt.
       $.clock.after(0, () => {
         void detectBranch($).then(() => refresh($))
+        void readUsage($).catch(() => undefined)
       })
     } catch (err) {
       await setError($, `rd-ledger: start failed (${kindOf(err)})`)
@@ -1574,11 +1797,61 @@ export const register: Register = (on, options) => {
     } catch {
       // Observing only.
     }
+    try {
+      await recordUsageTurn($, e.agentId, e.durationMs)
+    } catch {
+      // Observing only.
+    }
     return result
   })
 
+  // One model request in any loop (SPEC §6.6). Observing a stream: the chunks
+  // pass through untouched (`yield* next(e)`), `next(e)` is called exactly
+  // once, and nothing before it can throw (a hook that failed after calling it
+  // would cut the model's stream). Its wall time counts the request from send
+  // to its last chunk.
+  // Step bookkeeping runs one at a time, in order, beside the model loop: never awaited by the step, never two read-modify-writes at once.
+  let stepQueue: Promise<void> = Promise.resolve()
+  on('turn.step', async function* ($, e, next) {
+    let t0: number | null = null
+    try {
+      t0 = await $.clock.now()
+    } catch {
+      t0 = null
+    }
+    const result = yield* next(e)
+    // The step goes back at once; the bookkeeping (state, and $.agent.list for a new subagent) runs beside it, so a slow call never stalls the model loop.
+    stepQueue = stepQueue.then(() => recordStep($, e.agentId, e.model, result, t0)).catch(() => undefined)
+    return result
+  })
+
+  // The tool runs once, beneath, whatever this hook does: it counts the lines
+  // after `next(e)` settled and returns that result unchanged. Counts only: no
+  // path, argument or line text is kept.
+  on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
+    const ran = await next(e)
+    try {
+      await recordEdit($, ran)
+    } catch {
+      // Observing only.
+    }
+    return ran
+  }).catch(($, e, next) =>
+    // Past its budget anyway: inside a catch `next` is replay-safe, so once
+    // called it answers what the tool already returned without running it
+    // again. Never a deny: an observer must not refuse a tool.
+    next(e),
+  )
+
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
+    try {
+      // The Usage pane's figures: context, rate limits and cost (numbers and window kinds, no text).
+      const at = await $.clock.now()
+      await update($, usageRef, prev => usageFrom({ context: e.context, rateLimits: e.rateLimits, cost: e.cost }, prev, at, false))
+    } catch {
+      // Observing only.
+    }
     try {
       const usd = e.cost?.usd
       const now = await $.clock.now()
@@ -1654,35 +1927,50 @@ export const register: Register = (on, options) => {
     // (the .catch path answers from state alone; the surface it knows is the one learnt earlier)
   })
 
-  // The figure on the terminal: after the engine's own hint line, so its pills stay live.
+  // usage-gauge's command, kept for continuity: the same as /rd usage.
+  on('command.run', { command: 'spend' }, async ($, e) => {
+    return { text: await runUsageCommand($, e.origin.kind) }
+  }).catch(async ($) => {
+    // Past its budget or failed: answer from the state rather than leave a registered command with no output.
+    const view = await readUsageView($).catch(() => null)
+    return { text: view ? usageSummaryLine(view) : 'Usage: no reading yet.' }
+  })
+
+  // The one footer chip (SPEC §6.5) on the terminal: after the engine's own hint
+  // line, so its pills stay live. Only the terminal raises PromptHint.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const engine = await next(e)
     if (e.surface !== 'terminal') return engine
-    const label = footerLabel(await todayFigure($))
-    const { Box, Button } = $.ui.resolve(e)
+    const label = await chipText($)
+    const { Box, Text, Button } = $.ui.resolve(e)
     return (
       <Box flexDirection="row">
         {engine}
         <Box marginLeft={2}>
-          <Button key="rd-ledger" plain dimColor label={label} onPress={() => void openPane($, 'overview').catch(() => undefined)} />
+          {config.footerButton ? (
+            <Button key="rd-ledger" plain dimColor label={label} onPress={() => void openUsageAndLedger($).catch(() => undefined)} />
+          ) : (
+            <Text dimColor>{label}</Text>
+          )}
         </Box>
       </Box>
     )
   })
 
-  // The figure on the desktop: the footer's mode strip draws Text and Button
-  // chips only and clips what does not fit, so the label is the hourglass mark and
-  // today's R&D hours (≤ 10 characters). A press opens the Overview, the R&D tax
-  // ledger; with footerButton off it is plain text and /rd opens the pane.
+  // The chip on the desktop: the footer's mode strip draws Text and Button
+  // chips only and clips what does not fit, so the label is at most 16
+  // characters: the session cost and the hourglass with today's R&D hours by
+  // default. A press opens Usage with the R&D ledger as the tab beside it; with
+  // footerButton off it is plain text and /rd usage opens the panes.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const engine = await next(e)
     if (e.surface !== 'desktop') return engine
-    const label = footerLabel(await todayFigure($))
+    const label = await chipText($)
     const { Box, Text, Button } = $.ui.resolve(e)
     return (
       <Box flexDirection="row" alignItems="center" gap={1}>
         {config.footerButton ? (
-          <Button key="rd-ledger" plain label={label} onPress={() => void openPane($, 'overview').catch(() => undefined)} />
+          <Button key="rd-ledger" plain label={label} onPress={() => void openUsageAndLedger($).catch(() => undefined)} />
         ) : (
           <Text dimColor>{label}</Text>
         )}
@@ -1691,6 +1979,66 @@ export const register: Register = (on, options) => {
     )
   })
 
+  // The Usage pane (SPEC §6.6), drawn from $.state alone to the pane's width
+  // with B1's model: no Text longer than `cols`, tables fitted, text wrapped,
+  // the context bar as text cells on every surface.
+  on('ui.render', { component: 'Pane', requestId: USAGE_PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const v = await readUsageView($)
+    const isRefreshing = await read($, usageRefreshingRef)
+    const cols = Math.max(24, Math.floor(e.props.bodyColumns))
+    // The actions row closes the pane, after the price footnote and the caption.
+    const actions = (
+      <Box key="actions" flexDirection="row" flexWrap="wrap" gap={2} marginTop={1}>
+        <Button
+          key="refresh"
+          label={isRefreshing ? 'Refreshing' : 'Refresh'}
+          hotkey="r"
+          dimColor={isRefreshing}
+          onPress={() => void refreshUsage($, cols).catch(() => undefined)}
+        />
+        <Button key="ledger" label="R&D ledger" hotkey="d" onPress={() => void openPane($, null).catch(() => undefined)} />
+        <Button key="close" label="Close" hotkey="c" role="dismiss" onPress={() => void $.ui.close({ id: USAGE_PANE }).catch(() => undefined)} />
+      </Box>
+    )
+    if (!v.usage && v.totals.requests === 0) {
+      return (
+        <Box flexDirection="column">
+          <Text dimColor>Reading usage…</Text>
+          {actions}
+        </Box>
+      )
+    }
+    return (
+      <Box flexDirection="column">
+        <Box key="body" flexDirection="column">
+          {usageLines(v, cols, config.cacheTtl).map((line, i) =>
+            line.style === 'bar' ? (
+              <Box key={`u-${i}`} flexDirection="row">
+                <Text wrap="truncate">{line.text}</Text>
+                {line.track !== '' && (
+                  <Text wrap="truncate" dimColor>
+                    {line.track}
+                  </Text>
+                )}
+              </Box>
+            ) : (
+              <Text key={`u-${i}`} wrap="truncate" bold={line.style === 'title'} dimColor={line.style === 'dim'}>
+                {line.text === '' ? ' ' : line.text}
+              </Text>
+            ),
+          )}
+        </Box>
+        {actions}
+      </Box>
+    )
+  })
+
+  // Every view is drawn to the pane's width (SPEC §6): wide ≥ 84 columns,
+  // medium 60–83, narrow below 60. No Text line is longer than `cols`: the
+  // renderers fit tables by dropping columns and cutting cells, and wrap free
+  // text onto further lines, so nothing overflows and nothing is clipped
+  // silently past the pane's edge.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const rollup = await read($, rollupRef)
@@ -1707,28 +2055,40 @@ export const register: Register = (on, options) => {
         .then(() => (id === null ? undefined : ensureDetails($, id)))
         .catch(() => undefined)
 
+    // Two rows, so the chrome fits a narrow pane: the views, then the actions.
     const chrome = (
-      <Box key="chrome" flexDirection="row" gap={2}>
-        <Button key="view-session" label="Session" hotkey="i" onPress={showSession(null)} />
-        <Button key="view-sessions" label="Sessions" hotkey="a" onPress={setView('sessions')} />
-        <Button key="view-overview" label="Overview" hotkey="o" onPress={setView('overview')} />
-        <Button key="view-review" label="Review" hotkey="v" onPress={setView('review')} />
-        <Button key="view-spend" label="Spend" hotkey="s" onPress={setView('spend')} />
-        <Button key="refresh" label="Refresh" hotkey="r" onPress={() => void refresh($)} />
-        <Button key="export" label="Export" hotkey="e" onPress={() => void runExport($, null).catch(() => undefined)} />
-        {rollup?.health.lockStaleMs !== null && rollup?.health.lockStaleMs !== undefined && (
-          <Button key="clear-lock" label="Clear stale lock" hotkey="l" onPress={() => void clearStaleLock($).catch(() => undefined)} />
-        )}
-        <Button key="close" label="Close" hotkey="c" role="dismiss" onPress={() => void $.ui.close({ id: PANE }).catch(() => undefined)} />
+      <Box key="chrome" flexDirection="column">
+        <Box key="views" flexDirection="row" flexWrap="wrap" gap={2}>
+          <Button key="view-overview" label="R&D" hotkey="o" onPress={setView('overview')} />
+          <Button key="view-review" label="Review" hotkey="v" onPress={setView('review')} />
+          <Button key="view-spend" label="Spend" hotkey="s" onPress={setView('spend')} />
+          <Button key="view-session" label="Session" hotkey="i" onPress={showSession(null)} />
+          <Button key="view-sessions" label="Sessions" hotkey="a" onPress={setView('sessions')} />
+        </Box>
+        <Box key="actions" flexDirection="row" flexWrap="wrap" gap={2}>
+          <Button key="refresh" label="Refresh" hotkey="r" onPress={() => void refresh($)} />
+          <Button key="export" label="Export" hotkey="e" onPress={() => void runExport($, null).catch(() => undefined)} />
+          {rollup?.health.lockStaleMs !== null && rollup?.health.lockStaleMs !== undefined && (
+            <Button key="clear-lock" label="Clear stale lock" hotkey="l" onPress={() => void clearStaleLock($).catch(() => undefined)} />
+          )}
+          <Button key="close" label="Close" hotkey="c" role="dismiss" onPress={() => void $.ui.close({ id: PANE }).catch(() => undefined)} />
+        </Box>
       </Box>
     )
+    /** Free text as wrapped Text lines, each within the pane. */
+    const wrapped = (text: string, prefix: string, indent: number, props: { dimColor?: boolean; bold?: boolean; color?: string } = {}) =>
+      wrapText(text, cols, indent).map((line, i) => (
+        <Text key={`${prefix}-${i}`} wrap="truncate" {...props}>
+          {line === '' ? ' ' : line}
+        </Text>
+      ))
     const status = (
       <Box key="status" flexDirection="column">
-        {busy !== null && <Text dimColor>{`Working: ${oneLine(busy, 20)}…`}</Text>}
-        {lastError !== null && <Text color="red">{oneLine(lastError, cols)}</Text>}
+        {busy !== null && <Text dimColor wrap="truncate">{fit(`Working: ${oneLine(busy, 20)}…`, cols)}</Text>}
+        {lastError !== null && wrapped(oneLine(lastError, 400), 'error', 0, { color: 'red' })}
       </Box>
     )
-    if (!rollup) {
+    if (!rollup || !Array.isArray(rollup.weekTrend)) {
       return (
         <Box flexDirection="column">
           {chrome}
@@ -1737,10 +2097,11 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    // A renderer's text: unindented lines are titles (bold); every line is cut to the pane as a last guard.
     const lines = (text: string, prefix: string) =>
       text.split('\n').map((line, i) => (
         <Text key={`${prefix}-${i}`} wrap="truncate" bold={line !== '' && !line.startsWith(' ')}>
-          {line === '' ? ' ' : line}
+          {line === '' ? ' ' : fit(line, cols)}
         </Text>
       ))
 
@@ -1773,7 +2134,7 @@ export const register: Register = (on, options) => {
             </Box>
           )}
           <Box key="body" flexDirection="column" marginTop={1}>
-            {summary ? lines(sessionText(summary, rollup.zone, { showRepo: true }), 'se') : <Text dimColor>{missing}</Text>}
+            {summary ? lines(sessionText(summary, rollup.zone, { showRepo: true }, cols), 'se') : wrapped(missing, 'missing', 0, { dimColor: true })}
           </Box>
         </Box>
       )
@@ -1781,7 +2142,7 @@ export const register: Register = (on, options) => {
 
     if (view === 'sessions') {
       const shown = shownRows(sessionsShown)
-      const options = sessionOptions(rollup, shown)
+      const options = sessionOptions(rollup, shown, cols)
       const open = (value: string) => {
         if (!isSessionId(value) || !rollup.sessions.some(x => x.sessionId === value)) return
         showSession(value)()
@@ -1792,7 +2153,7 @@ export const register: Register = (on, options) => {
             <Button key="more" label="More" hotkey="m" onPress={() => void update($, sessionsShownRef, n => Math.min(SESSIONS_SHOWN_MAX, shownRows(n) + SESSIONS_SHOWN)).catch(() => undefined)} />
           </Box>
         ) : null
-      const listing = lines(sessionsText(rollup, { showRepo: true, shown, hasMore: true }), 'ss')
+      const listing = lines(sessionsText(rollup, { showRepo: true, shown, hasMore: true }, cols), 'ss')
       if (e.surface !== 'mobile' && options.length > 0) {
         const { Select } = $.ui.resolve(e)
         return (
@@ -1821,13 +2182,29 @@ export const register: Register = (on, options) => {
       )
     }
 
-    if (view === 'overview' || view === 'spend') {
+    if (view === 'overview') {
       return (
         <Box flexDirection="column">
           {chrome}
           {status}
           <Box key="body" flexDirection="column" marginTop={1}>
-            {view === 'overview' ? lines(overviewText(rollup, cols), 'ov') : lines(spendText(rollup), 'sp')}
+            {rdLines(rollup, cols).map((line, i) => (
+              <Text key={`rd-${i}`} wrap="truncate" bold={line.style === 'title'} dimColor={line.style === 'dim'}>
+                {line.text === '' ? ' ' : line.text}
+              </Text>
+            ))}
+          </Box>
+        </Box>
+      )
+    }
+
+    if (view === 'spend') {
+      return (
+        <Box flexDirection="column">
+          {chrome}
+          {status}
+          <Box key="body" flexDirection="column" marginTop={1}>
+            {lines(spendText(rollup, cols), 'sp')}
           </Box>
         </Box>
       )
@@ -1852,10 +2229,10 @@ export const register: Register = (on, options) => {
             .sort()
             .map(id => {
               const c = mapping.components[id]
-              return { value: `c:${id}`, label: oneLine(`${c?.name ?? id} (${c?.entity ?? ''})`, 80) }
+              return { value: `c:${id}`, label: fit(oneLine(`${c?.name ?? id} (${c?.entity ?? ''})`, 80), cols) }
             }),
           { value: 'ignore', label: 'Ignore' },
-          ...entityIds.map(id => ({ value: `nonrd:${id}`, label: oneLine(`Non-R&D → ${mapping.entities[id]?.name ?? id}`, 80) })),
+          ...entityIds.map(id => ({ value: `nonrd:${id}`, label: fit(oneLine(`Non-R&D → ${mapping.entities[id]?.name ?? id}`, 80), cols) })),
         ]
       : []
 
@@ -1863,46 +2240,64 @@ export const register: Register = (on, options) => {
     if (!isMobile) {
       const { Select, Input } = $.ui.resolve(e)
       editors = {
-        select: (key: string) => <Select key={`map:${key}`} label={`Map ${oneLine(key, 60)}`} options={options} onSelect={(value: string) => void pickQueue($, key, value).catch(() => undefined)} />,
+        select: (key: string) => <Select key={`map:${key}`} label={fit(`Map ${oneLine(key, 60)}`, cols)} options={options} onSelect={(value: string) => void pickQueue($, key, value).catch(() => undefined)} />,
         note: (component: string) => {
           const noteKey = `${component}|${week}`
           const save = (value: string) => void update($, draftNotesRef, m => ({ ...m, [noteKey]: cleanField(value, CAP.note).value ?? '' })).catch(() => undefined)
-          return <Input key={`note:${component}`} label={`Note for ${component}: what was done, what was uncertain, what was tried`} value={notes[noteKey] ?? ''} onInput={save} onSubmit={save} />
+          // The prompt is wrapped text above the field; the field's own label is just the component, fitted.
+          return (
+            <Box key={`note:${component}`} flexDirection="column">
+              {wrapped(`What was done on ${oneLine(component, 60)}, what was uncertain, what was tried:`, `note-${component}-prompt`, 0, { dimColor: true })}
+              <Input key={`note:${component}`} label={fit(`Note for ${oneLine(component, 60)}`, cols)} value={notes[noteKey] ?? ''} onInput={save} onSubmit={save} />
+            </Box>
+          )
         },
         other: (id: string, label: string) => {
           const save = (value: string) => void update($, draftOtherHoursRef, m => ({ ...m, [id]: cleanField(value, 12).value ?? '' })).catch(() => undefined)
-          return <Input key={`other:${id}`} label={label} placeholder="hours, 0 to 168" value={other[id] ?? ''} onInput={save} onSubmit={save} />
+          return <Input key={`other:${id}`} label={fit(label, cols)} placeholder={fit('hours, 0 to 168', cols)} value={other[id] ?? ''} onInput={save} onSubmit={save} />
         },
       }
     }
 
-    const dayRows = weekDates(week).map(date => {
-      const ours = (rollup.dayTotals[date] ?? 0) / 3600
-      const theirs = compare?.byDate[date] ?? 0
-      const apart = Math.max(ours, theirs) > 0 && Math.abs(ours - theirs) / Math.max(ours, theirs) > COMPARE_MARK
-      return `${date}  ledger ${ours.toFixed(2)} h  rd-tracker ${theirs.toFixed(2)} h  Δ ${(ours - theirs).toFixed(2)}${apart ? '  ! over 10 %' : ''}`
-    })
+    // The Compare table, fitted to the pane; rows over 10 % apart are marked.
+    // A narrow pane reads the day as MM-DD, rd-tracker as `rdt` and the mark short; past that the mark goes first, then Δ.
+    const isNarrow = cols < 60
+    const compareLines = fitTable(
+      [
+        { head: isNarrow ? 'Day' : 'Date', align: 'l', min: 10 },
+        { head: 'Ledger', align: 'r' },
+        { head: isNarrow ? 'rdt' : 'rd-tracker', align: 'r' },
+        { head: 'Δ', align: 'r', drop: 2 },
+        { head: '', align: 'l', drop: 1 },
+      ],
+      weekDates(week).map(date => {
+        const ours = (rollup.dayTotals[date] ?? 0) / 3600
+        const theirs = compare?.byDate[date] ?? 0
+        const apart = Math.max(ours, theirs) > 0 && Math.abs(ours - theirs) / Math.max(ours, theirs) > COMPARE_MARK
+        return [isNarrow ? date.slice(5) : date, ours.toFixed(2), theirs.toFixed(2), (ours - theirs).toFixed(2), apart ? (isNarrow ? '! >10 %' : '! over 10 %') : '']
+      }),
+      cols,
+    )
 
     return (
       <Box flexDirection="column">
         {chrome}
         {status}
-        <Text key="head" bold>{`Review ${week} · ${review?.confirmed ? `confirmed rev ${review.rev}` : 'open'}${review && review.changedRows > 0 ? ` · ${review.changedRows} changed since confirmation` : ''}`}</Text>
-        {isMobile && <Text key="mobile">Use the terminal or the desktop to map repositories, set activities, write notes and confirm the week.</Text>}
+        {wrapped(`Review ${week} · ${review?.confirmed ? `confirmed rev ${review.rev}` : 'open'}${review && review.changedRows > 0 ? ` · ${review.changedRows} changed since confirmation` : ''}`, 'head', 0, { bold: true })}
+        {isMobile && wrapped('Use the terminal or the desktop to map repositories, set activities, write notes and confirm the week.', 'mobile', 0)}
         {problems.length > 0 && (
           <Box key="problems" flexDirection="column" marginTop={1}>
-            <Text bold>{`components.json: ${problems.length} ${problems.length === 1 ? 'problem' : 'problems'}`}</Text>
-            {problems.slice(0, 10).map((p, i) => (
-              <Text key={`problem-${i}`} wrap="truncate">{`  ${oneLine(p, cols)}`}</Text>
-            ))}
+            {wrapped(`components.json: ${problems.length} ${problems.length === 1 ? 'problem' : 'problems'}`, 'problems-head', 0, { bold: true })}
+            {problems.slice(0, 10).map((p, i) => wrapped(oneLine(p, 400), `problem-${i}`, 2))}
           </Box>
         )}
         <Box key="queue" flexDirection="column" marginTop={1}>
-          <Text bold>{`Unmapped repositories (${rollup.queue.length})`}</Text>
+          {wrapped(`Unmapped repositories (${rollup.queue.length})`, 'queue-head', 0, { bold: true })}
           {rollup.queue.length === 0 && <Text dimColor>  none this week</Text>}
           {rollup.queue.map(q => (
             <Box key={`q-${q.key}`} flexDirection="column">
-              <Text wrap="truncate">{`  ${oneLine(q.key, 60)}  ${hoursText(q.seconds)}  ${q.branches.map(b => oneLine(b, 40)).join(', ')}${q.isNewLocation ? '  new location?' : ''}`}</Text>
+              {wrapped(oneLine(q.key, 200), `q-${q.key}-key`, 2)}
+              {wrapped(`${hoursText(q.seconds)} · ${q.branches.length === 0 ? 'no branch' : q.branches.map(b => oneLine(b, 40)).join(', ')}${q.isNewLocation ? ' · new location?' : ''}`, `q-${q.key}-facts`, 4)}
               {editors?.select(q.key)}
             </Box>
           ))}
@@ -1916,9 +2311,11 @@ export const register: Register = (on, options) => {
             const poe = draft?.poe ?? row.poe
             const marks = [...row.flags.map(f => (f === 'mixed-entities' ? '[mixed entities]' : `[${oneLine(f, 20)}]`)), draft ? '[draft]' : ''].filter(Boolean).join(' ')
             const statusText = row.status === 'changed' ? 'changed since confirmation' : row.status
+            // Two lines per row: what it is, then its figures and marks (wrapped), then its buttons.
             return (
               <Box key={`row-${row.key}`} flexDirection="column">
-                <Text wrap="truncate">{`  ${row.date}  ${oneLine(row.component, 40)}  ${oneLine(row.entity || '-', 20)}  ${hoursText(row.seconds)}  ${statusText}  ${ACTIVITY_LABEL[activity]}${poe ? '  POE' : ''}${marks ? `  ${marks}` : ''}`}</Text>
+                {wrapped(`${oneLine(row.component, 60)} · ${oneLine(row.entity || '-', 40)}`, `row-${row.key}-head`, 2)}
+                {wrapped(`${row.date}  ${hoursText(row.seconds)}  ${statusText}  ${ACTIVITY_LABEL[activity]}${poe ? '  POE' : ''}${marks ? `  ${marks}` : ''}`, `row-${row.key}-facts`, 4)}
                 {!isMobile && !isBucket(row.component) && (
                   <Box flexDirection="row" gap={1}>
                     <Button key={`act:${row.key}:research`} label="Research" onPress={() => void setActivity($, row, 'direct_research').catch(() => undefined)} />
@@ -1933,22 +2330,24 @@ export const register: Register = (on, options) => {
         </Box>
         {editors && components.length > 0 && (
           <Box key="notes" flexDirection="column" marginTop={1}>
-            <Text bold>Notes (required before POE)</Text>
+            {wrapped('Notes (required before POE)', 'notes-head', 0, { bold: true })}
             {components.map(c => editors.note(c))}
           </Box>
         )}
         {editors && (
           <Box key="other" flexDirection="column" marginTop={1}>
-            <Text bold>Other hours this week</Text>
+            {wrapped('Other hours this week', 'other-head', 0, { bold: true })}
             {entityIds.map(id => editors.other(id, `Other hours, ${oneLine(mapping?.entities[id]?.name ?? id, 60)}`))}
             {editors.other('non_business', 'Non-business hours')}
           </Box>
         )}
         {bridged && compare && (
           <Box key="compare" flexDirection="column" marginTop={1}>
-            <Text bold>{`rd-tracker Claude Code hours${compare.method ? ` (${oneLine(compare.method, 40)})` : ''}`}</Text>
-            {dayRows.map((line, i) => (
-              <Text key={`cmp-${i}`} wrap="truncate">{`  ${line}`}</Text>
+            {wrapped(`rd-tracker Claude Code hours${compare.method ? ` (${oneLine(compare.method, 40)})` : ''}`, 'cmp-head', 0, { bold: true })}
+            {compareLines.map((line, i) => (
+              <Text key={`cmp-${i}`} wrap="truncate">
+                {line}
+              </Text>
             ))}
           </Box>
         )}

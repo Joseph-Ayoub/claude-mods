@@ -1,5 +1,7 @@
 # usage-gauge
 
+> **Superseded on 2026-10-13 by rd-ledger's Usage pane; kept for reference.** The Usage pane, `/spend` and the footer cost chip now live in the rd-ledger mod (`/rd usage`, `/spend`, and one footer chip reading `$123 ⧗2.4h` that opens Usage with the R&D ledger as the tab beside it), so the two panes can sit side by side. Its estimates price cache writes by the TTL in force rather than a fixed 1.25×. Disable this mod when rd-ledger is enabled, or the footer shows two cost chips and both register `/spend`.
+
 What this session has cost and used, live, without typing `/usage` and getting a card dropped into the transcript. A small chip in the prompt footer reads `$123`; click it (or type `/spend`) and a **Usage** pane opens with the cost, time, context window, rate limits, per-model tokens and cache hit, what the subagents spent, and the lines the session changed. Nothing lands in the transcript, nothing is written to disk, and nothing is sent anywhere.
 
 ## What you see

@@ -31,6 +31,8 @@ import {
   ringSvg,
   footerParts,
   formatCompact,
+  formatTokens,
+  rowOf,
   decodeEngineSession,
   diskLine,
   engineRow,
@@ -167,6 +169,8 @@ describe('the registry', () => {
     model: 'claude-fable-5-1',
     rssMB: 2048,
     contextPercent: 40,
+    contextTokens: null,
+    contextWindow: null,
     rateLimitPercent: null,
     agents: 0,
     lastActivityAt: 0,
@@ -183,6 +187,17 @@ describe('the registry', () => {
     expect(parseEntry(JSON.stringify(entry({ sessionId: '../../etc/passwd' })))).toBeNull()
     expect(parseEntry('[]')).toBeNull()
     expect(parseEntry(JSON.stringify({ ...entry(), pid: 'x' }))?.pid).toBeNull()
+  })
+
+  test('a heartbeat carries the token count and window; an older build\'s reads null', () => {
+    const full = parseEntry(JSON.stringify(entry({ contextTokens: 160_000, contextWindow: 1_000_000 })))
+    expect(full).toMatchObject({ contextTokens: 160_000, contextWindow: 1_000_000 })
+    expect(rowOf(full!, 'live', 100_000, 'x')).toMatchObject({ contextTokens: 160_000, contextWindow: 1_000_000 })
+    // An entry written before 0.2.1 has neither field; a wrong type is as good as absent.
+    const { contextTokens: _t, contextWindow: _w, ...old } = entry()
+    expect(parseEntry(JSON.stringify(old))).toMatchObject({ contextTokens: null, contextWindow: null })
+    expect(parseEntry(JSON.stringify({ ...old, contextTokens: '160000', contextWindow: null }))).toMatchObject({ contextTokens: null, contextWindow: null })
+    expect(rowOf(parseEntry(JSON.stringify(old))!, 'live', 100_000, 'x')).toMatchObject({ contextTokens: null, contextWindow: null })
   })
 
   test('live, stale after 120 s, gone when the pid left or was reused', () => {
@@ -248,6 +263,8 @@ const row = (over: Partial<SessionRow> = {}): SessionRow => ({
   model: 'claude-fable-5-1',
   rssMB: 2048,
   contextPercent: 40,
+  contextTokens: null,
+  contextWindow: null,
   rateLimitPercent: null,
   agents: 1,
   idleMinutes: 5,
@@ -307,7 +324,7 @@ describe('the gauge', () => {
 })
 
 describe('optimize rules', () => {
-  const options = { idleMinutes: 30 }
+  const options = { idleMinutes: 30, contextTokens: 150_000 }
 
   test('a calm machine with busy sessions gets no advice (no false positives)', () => {
     expect(advise(snap(), options)).toEqual([])
@@ -428,8 +445,8 @@ describe('footer', () => {
       },
       thisSessionMB: null,
       sessions: [
-        { sessionId: 'a', label: 'a', model: 'm', rssMB: 1, contextPercent: null, rateLimitPercent: null, agents: 0, idleMinutes: null, status: 'live' as const, isThis: true },
-        { sessionId: 'b', label: 'b', model: 'm', rssMB: 1, contextPercent: null, rateLimitPercent: null, agents: 0, idleMinutes: null, status: 'gone' as const, isThis: false },
+        { sessionId: 'a', label: 'a', model: 'm', rssMB: 1, contextPercent: null, contextTokens: null, contextWindow: null, rateLimitPercent: null, agents: 0, idleMinutes: null, status: 'live' as const, isThis: true },
+        { sessionId: 'b', label: 'b', model: 'm', rssMB: 1, contextPercent: null, contextTokens: null, contextWindow: null, rateLimitPercent: null, agents: 0, idleMinutes: null, status: 'gone' as const, isThis: false },
       ],
       unregistered: null,
       topApps: [],
@@ -486,12 +503,12 @@ describe('disk', () => {
   })
 
   test('an idle session without the mod gets the archive tip, never the wrap one', () => {
-    const base = { sessionId: 'e', label: 'old · tab', model: '', rssMB: 3072, contextPercent: null, rateLimitPercent: null, agents: 0, idleMinutes: 45, status: 'live' as const, isThis: false }
+    const base = { sessionId: 'e', label: 'old · tab', model: '', rssMB: 3072, contextPercent: null, contextTokens: null, contextWindow: null, rateLimitPercent: null, agents: 0, idleMinutes: 45, status: 'live' as const, isThis: false }
     const machine = { at: 0, totalBytes: null, cores: null, usedBytes: null, freeBytes: null, compressedBytes: null, usedPercent: null, pressure: 'ok' as const, swapUsedBytes: null, swapTotalBytes: null, load1: null, diskFreeBytes: null, diskTotalBytes: null }
     const snapshot = { at: 0, sessionId: 's', machine, thisSessionMB: null, sessions: [{ ...base, hasMod: false }], unregistered: null, topApps: [] }
-    expect(advise(snapshot, { idleMinutes: 30 }).map(t => t.text)).toEqual(['old · tab: idle 45 min, archive it from the sidebar (frees 3.0 GB)'])
+    expect(advise(snapshot, { idleMinutes: 30, contextTokens: 150_000 }).map(t => t.text)).toEqual(['old · tab: idle 45 min, archive it from the sidebar (frees 3.0 GB)'])
     const kept = { ...snapshot, sessions: [{ ...base, hasMod: true }] }
-    expect(advise(kept, { idleMinutes: 30 }).map(t => t.text)).toEqual(['old · tab: idle 45 min, wrap or archive (frees 3.0 GB)'])
+    expect(advise(kept, { idleMinutes: 30, contextTokens: 150_000 }).map(t => t.text)).toEqual(['old · tab: idle 45 min, wrap or archive (frees 3.0 GB)'])
   })
 
   test('decodeEngineSession: the engine\'s record of a session without the mod', () => {
@@ -564,7 +581,7 @@ describe('disk', () => {
 
   test('memory tips carry an action where Apply can do something', () => {
     const machine = { at: 0, totalBytes: 128 * 1024 ** 3, cores: 18, usedBytes: 120 * 1024 ** 3, freeBytes: null, compressedBytes: null, usedPercent: 94, pressure: 'warn' as const, swapUsedBytes: null, swapTotalBytes: null, load1: null, diskFreeBytes: 5 * 1024 ** 3, diskTotalBytes: null }
-    const row = (over: Record<string, unknown>) => ({ sessionId: 'x', label: 'x', model: 'm', rssMB: 2048, contextPercent: null, rateLimitPercent: null, agents: 0, idleMinutes: 0, status: 'live' as const, isThis: false, hasMod: true, ...over })
+    const row = (over: Record<string, unknown>) => ({ sessionId: 'x', label: 'x', model: 'm', rssMB: 2048, contextPercent: null, contextTokens: null, contextWindow: null, rateLimitPercent: null, agents: 0, idleMinutes: 0, status: 'live' as const, isThis: false, hasMod: true, ...over })
     const snapshot = {
       at: 0,
       sessionId: 's',
@@ -574,7 +591,7 @@ describe('disk', () => {
       unregistered: null,
       topApps: [{ name: 'Google Chrome', rssMB: 4096, processes: 20 }],
     }
-    const tips = advise(snapshot, { idleMinutes: 30 })
+    const tips = advise(snapshot, { idleMinutes: 30, contextTokens: 150_000 })
     const byKey = Object.fromEntries(tips.map(t => [t.key, t.action ?? null]))
     expect(byKey['idle:idle']).toEqual({ kind: 'ask-wrap', sessionId: 'idle' })
     expect(byKey['idle:nomod']).toBeNull()
@@ -586,14 +603,63 @@ describe('disk', () => {
     expect(secondary['context:other']).toBeNull()
     expect(tips.filter(t => t.key !== 'context:me').every(t => t.secondary === undefined)).toBe(true)
     expect(tips.find(t => t.key === 'context:me')?.text).toBe(
-      'x: context 90%. Compact to keep going mid-task, or hand off at a milestone (a note is written for the fresh session).',
+      'x: context 90%. Compact to keep going mid-task, or hand off at the next milestone (a note is written for the fresh session).',
     )
     expect(tips.find(t => t.key === 'context:other')?.text).toBe('x: context 90%, compact or hand off from there')
     expect(byKey['app']).toEqual({ kind: 'quit-app', app: 'Google Chrome' })
     // The host of this session is never offered a quit.
     const host = { ...snapshot, topApps: [{ name: 'Claude', rssMB: 4096, processes: 20 }] }
-    expect(advise(host, { idleMinutes: 30 }).find(t => t.key === 'app')?.action).toBeUndefined()
+    expect(advise(host, { idleMinutes: 30, contextTokens: 150_000 }).find(t => t.key === 'app')?.action).toBeUndefined()
     expect(byKey['disk']).toEqual({ kind: 'open-disk' })
+  })
+
+  test('the context tip fires at an absolute token count, the percent rule is the fallback', () => {
+    const me = (over: Partial<SessionRow>) => row({ sessionId: 'me', label: 'me', isThis: true, contextWindow: 1_000_000, ...over })
+    const tips = (sessions: SessionRow[], contextTokens = 150_000) => advise(snap({ sessions }), { idleMinutes: 30, contextTokens }).filter(a => a.key.startsWith('context:'))
+
+    // A 1M window at 160k tokens (16 %) is past the sweet spot: this session offers both ways out.
+    const [fired] = tips([me({ contextTokens: 160_000, contextPercent: 16 })])
+    expect(fired?.text).toBe('me: context 160k (16%). Compact to keep going mid-task, or hand off at the next milestone (a note is written for the fresh session).')
+    expect(fired?.action).toEqual({ kind: 'compact' })
+    expect(fired?.secondary).toEqual({ kind: 'hand-off' })
+    // At the threshold it fires; one under does not, whatever the window.
+    expect(tips([me({ contextTokens: 150_000, contextPercent: 15 })])).toHaveLength(1)
+    expect(tips([me({ contextTokens: 149_000, contextPercent: 15 })])).toEqual([])
+    // An unknown count falls back to the percent rule.
+    expect(tips([me({ contextTokens: null, contextPercent: 91 })])[0]?.text).toContain('context 91%.')
+    expect(tips([me({ contextTokens: null, contextPercent: 80 })])).toEqual([])
+    // Neither known: nothing to say.
+    expect(tips([me({ contextTokens: null, contextPercent: null })])).toEqual([])
+    // Only the count known (no percent): the count alone is drawn.
+    expect(tips([me({ contextTokens: 200_000, contextPercent: null })])[0]?.text).toContain('context 200k.')
+    // An option of 0 means the percent of the window: 400k at 40 % stays quiet, at 91 % it fires.
+    expect(tips([me({ contextTokens: 400_000, contextPercent: 40 })], 0)).toEqual([])
+    expect(tips([me({ contextTokens: 910_000, contextPercent: 91 })], 0)[0]?.text).toContain('context 910k (91%).')
+    // A lower configured threshold fires earlier.
+    expect(tips([me({ contextTokens: 60_000, contextPercent: 6 })], 50_000)).toHaveLength(1)
+    // Another session's tip is advice only, with the same figures.
+    const [other] = tips([row({ sessionId: 'o', label: 'shop · feat', contextTokens: 184_000, contextPercent: 18 })])
+    expect(other).toEqual({ key: 'context:o', text: 'shop · feat: context 184k (18%), compact or hand off from there' })
+    // A stale session is never advised on.
+    expect(tips([row({ status: 'stale', contextTokens: 500_000, contextPercent: 50 })])).toEqual([])
+  })
+
+  test('formatTokens keeps a count short: 572, 12.3k, 184k, 1.2M', () => {
+    expect(formatTokens(0)).toBe('0')
+    expect(formatTokens(572)).toBe('572')
+    expect(formatTokens(999)).toBe('999')
+    expect(formatTokens(1000)).toBe('1k')
+    expect(formatTokens(12_300)).toBe('12.3k')
+    expect(formatTokens(99_949)).toBe('99.9k')
+    expect(formatTokens(99_960)).toBe('100k')
+    expect(formatTokens(100_000)).toBe('100k')
+    expect(formatTokens(184_400)).toBe('184k')
+    expect(formatTokens(999_600)).toBe('1M')
+    expect(formatTokens(1_000_000)).toBe('1M')
+    expect(formatTokens(1_200_000)).toBe('1.2M')
+    expect(formatTokens(null)).toBe('?')
+    expect(formatTokens(Number.NaN)).toBe('?')
+    expect(formatTokens(-5)).toBe('?')
   })
 
   test('ringSvg takes a title for the disk ring', () => {
