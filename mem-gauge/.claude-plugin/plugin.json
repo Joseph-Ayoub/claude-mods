@@ -1,0 +1,35 @@
+{
+  "name": "mem-gauge",
+  "version": "0.1.2",
+  "description": "A pressable memory gauge under the composer and a /mem pane: what is using this Mac's RAM across Claude sessions, agents, models and apps, with rule-based advice.",
+  "author": {
+    "name": "Joseph Ayoub"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "intervalSeconds": {
+      "type": "number",
+      "title": "Refresh every (seconds)",
+      "description": "How often the gauge re-reads memory. 10 to 600; default 30.",
+      "default": 30
+    },
+    "idleMinutes": {
+      "type": "number",
+      "title": "Idle after (minutes)",
+      "description": "A session with no turn for this long and over 1 GB is offered 'wrap or archive' advice and an Ask to wrap button. Default 30.",
+      "default": 30
+    },
+    "statusLine": {
+      "type": "boolean",
+      "title": "Also show the status line",
+      "description": "Off by default: the gauge row under the prompt (red ring icon + 'Memory 60% · Pressure ✓ · …', pressable) already carries the summary on the terminal and the desktop app. Turn on for VS Code or mobile, where that row is not drawn and the status line is the only gauge besides /mem.",
+      "default": false
+    },
+    "footerButtons": {
+      "type": "boolean",
+      "title": "Clickable footer figures",
+      "description": "Draw the two footer figures as buttons that open the Memory and Disk panes (the desktop draws every button as a grey chip). Off, the figures are plain text and /mem and /disk open the panes.",
+      "default": true
+    }
+  }
+}

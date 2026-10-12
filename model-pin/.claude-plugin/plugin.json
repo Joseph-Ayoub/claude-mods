@@ -1,0 +1,23 @@
+{
+  "name": "model-pin",
+  "version": "0.1.0",
+  "description": "Pin a project to one model, show a drift badge when the session leaves it, and re-apply the pin once.",
+  "author": {
+    "name": "Joseph Ayoub"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "lock": {
+      "type": "boolean",
+      "title": "Ask before leaving the pin",
+      "description": "When on, a /model or picker switch away from the pinned model asks for confirmation first. Off by default: the badge and one re-apply are the whole behavior.",
+      "default": false
+    },
+    "includeUserSettings": {
+      "type": "boolean",
+      "title": "Pin to the user-level model too",
+      "description": "When on, a \"model\" in ~/.claude/settings.json counts as a pin for projects that set none, so sessions started on another model are badged and switched back to it once. Off by default: a global default is not a per-project decision, and sessions started on a cheaper model on purpose stay there.",
+      "default": false
+    }
+  }
+}

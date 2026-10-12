@@ -1,0 +1,39 @@
+{
+  "name": "merge-lane",
+  "version": "0.1.0",
+  "description": "One merge lane per repo across concurrent sessions: a priority queue, a Bash merge gate, auto-release on merge, and a wake-up for the next session.",
+  "author": { "name": "Joseph Ayoub" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "auto": {
+      "type": "boolean",
+      "title": "Auto-proceed when the lane frees",
+      "description": "When this session is woken with the lane, submit the proceed-with-merge prompt for it, as this mod's own message (never as your words). /lane auto on|off overrides it for one session.",
+      "default": true
+    },
+    "staleMinutes": {
+      "type": "number",
+      "title": "Stale holder after (minutes)",
+      "description": "A holder whose heartbeat is older than this, whose session also fails a liveness ping, may be broken with /lane take. The queue head breaks it on its own 5 minutes later.",
+      "default": 10
+    },
+    "maxHoldMinutes": {
+      "type": "number",
+      "title": "Max hold without a merge attempt (minutes)",
+      "description": "A holder that has made no merge attempt for this long hands the lane to the next waiting session. 0 turns this off.",
+      "default": 30
+    },
+    "enforce": {
+      "type": "boolean",
+      "title": "Enforce the merge gate",
+      "description": "Refuse merges (gh pr merge, merge API calls, pushes to main/master) from sessions that do not hold the lane. Off: the queue and commands still work, nothing is refused.",
+      "default": true
+    },
+    "allowAutoMerge": {
+      "type": "boolean",
+      "title": "Allow gh pr merge --auto",
+      "description": "Off by default: auto-merge bypasses the lane and the re-verify-before-merge step, so it is refused.",
+      "default": false
+    }
+  }
+}

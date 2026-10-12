@@ -1,0 +1,62 @@
+{
+  "name": "rd-ledger",
+  "version": "0.1.0",
+  "description": "Contemporaneous R&D time and AI-usage ledger: engagement hours by business component, list-price usage estimates, a weekly review with buttons, a CPA export, and an optional bridge to rd-tracker. Metadata only, nothing leaves the Mac.",
+  "author": {
+    "name": "Joseph Ayoub"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "footerButton": {
+      "type": "boolean",
+      "title": "Footer figure opens the pane",
+      "description": "Draw today's R&D hours and this month's usage estimate as a pressable chip under the composer (the desktop draws every button as a grey chip). Off, the figure is plain text and /rd opens the pane.",
+      "default": true
+    },
+    "refreshMinutes": {
+      "type": "number",
+      "title": "Refresh every (minutes)",
+      "description": "How often the week and month figures are recomputed from the session files. 1 to 60; default 5.",
+      "default": 5
+    },
+    "idleGapMinutes": {
+      "type": "number",
+      "title": "Idle gap (minutes)",
+      "description": "Two prompts further apart than this start a new engagement block. 5 to 120; default 30, the canonical rd-tracker methodology. Changing it changes the method hash printed on every export.",
+      "default": 30
+    },
+    "cacheTtl": {
+      "type": "string",
+      "title": "Prompt-cache write assumption",
+      "description": "The engine does not say whether a cache write was 5-minute (1.25x input price) or 1-hour (2x). Pick the one your sessions use; a session that reports its TTL overrides this.",
+      "options": [
+        "5m",
+        "1h"
+      ],
+      "default": "5m"
+    },
+    "rdtRepo": {
+      "type": "string",
+      "title": "rd-tracker repository (absolute path)",
+      "description": "Leave empty to run standalone. With a path, the Review view shows rd-tracker's hours beside this ledger's, entities and components can be imported, and the bridge mode below applies.",
+      "default": ""
+    },
+    "bridgeMode": {
+      "type": "string",
+      "title": "Bridge mode",
+      "description": "corroborate: this ledger writes nothing into rd-tracker and the review shows both. source-of-truth: confirming a week records its hours in rd-tracker through rdt add (double counts unless the nightly ingest excludes Claude Code). off: no rdt calls at all.",
+      "options": [
+        "corroborate",
+        "source-of-truth",
+        "off"
+      ],
+      "default": "corroborate"
+    },
+    "personLabel": {
+      "type": "string",
+      "title": "Person label for exports",
+      "description": "Printed only in the export README's header (Person: …). Leave blank to print 'not recorded — add on cover sheet'. Never stored in the session records.",
+      "default": ""
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "usage-gauge",
+  "version": "0.1.4",
+  "description": "A live cost chip in the prompt footer and a /spend Usage pane: the session's cost, context by category, rate limits, tokens and cache hit per model, subagent share and code changes, without /usage landing in the transcript.",
+  "author": {
+    "name": "Joseph Ayoub"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "footerButton": {
+      "type": "boolean",
+      "title": "Clickable footer chip",
+      "description": "Draw the footer figure as a button that opens the Usage pane (the desktop draws every button as a grey chip). Off, the figure is plain text and /spend opens the pane.",
+      "default": true
+    },
+    "chipContext": {
+      "type": "boolean",
+      "title": "Context in the chip",
+      "description": "Also show the context window's fill in the chip ('$123 · ctx 12%'). Off by default: the desktop's footer strip truncates every chip to '…' once they overflow it, and the context figure is a click away in the pane.",
+      "default": false
+    }
+  }
+}

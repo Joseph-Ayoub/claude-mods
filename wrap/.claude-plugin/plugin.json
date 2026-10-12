@@ -1,0 +1,17 @@
+{
+  "name": "wrap",
+  "version": "0.1.1",
+  "author": {
+    "name": "Joseph Ayoub"
+  },
+  "description": "/wrap close-out command: deterministic git/gh/CI/worktree checklist where unknown is never green.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "acceptSkippedChecks": {
+      "type": "boolean",
+      "title": "Count skipped or neutral checks as green",
+      "description": "Off by default: only SUCCESS counts. Turn on if your repo has conditional jobs that skip.",
+      "default": false
+    }
+  }
+}

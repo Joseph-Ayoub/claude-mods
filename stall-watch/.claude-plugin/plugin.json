@@ -1,0 +1,7 @@
+{
+  "name": "stall-watch",
+  "version": "0.1.0",
+  "description": "Auto-retries transient API failures (capped), pins a usage-limit countdown, and can resume after a limit reset (opt-in via /stall-watch).",
+  "author": { "name": "Joseph Ayoub" },
+  "types": "./types/index.d.ts"
+}

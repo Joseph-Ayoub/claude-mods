@@ -1,0 +1,15 @@
+{
+  "name": "joseph-mods",
+  "owner": { "name": "Joseph Ayoub" },
+  "plugins": [
+    { "name": "cockpit", "source": "./cockpit", "description": "Band above the composer: quick replies, live standing, decision cards, waiting-on-you items, rule capture" },
+    { "name": "stall-watch", "source": "./stall-watch", "description": "Auto-retry transient API failures, usage-limit countdown, opt-in resume after a rate-limit reset" },
+    { "name": "wrap", "source": "./wrap", "description": "/wrap close-out checklist: tree, push, PR, CI on head, base freshness, merged, worktrees, background tasks" },
+    { "name": "model-pin", "source": "./model-pin", "description": "Per-project model pin with a drift badge and a safe re-apply" },
+    { "name": "secret-guard", "source": "./secret-guard", "description": "Holds your own prompt when it carries a credential shape; redact and reference instead" },
+    { "name": "mem-gauge", "source": "./mem-gauge", "description": "RAM gauge under the composer and a /mem pane: per-session memory, agents, models, top processes, optimization advice" },
+    { "name": "merge-lane", "source": "./merge-lane", "description": "One merge lane per repo: priority queue, /lane commands, Bash merge gate, auto-release on merge, wake the next session" },
+    { "name": "usage-gauge", "source": "./usage-gauge", "description": "Live cost and context chip in the prompt footer and a /spend pane: cost, context breakdown, rate limits, per-model tokens and cache hit, subagent share, code changes" },
+    { "name": "rd-ledger", "source": "./rd-ledger", "description": "Contemporaneous R&D time and AI-usage ledger: engagement hours by business component, list-price usage estimates, a weekly review with buttons, a CPA export, an optional bridge to rd-tracker; metadata only, nothing leaves the Mac" }
+  ]
+}
