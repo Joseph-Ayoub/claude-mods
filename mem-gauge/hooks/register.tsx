@@ -1095,6 +1095,18 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    if (config.footerCompact) {
+      // Plain text, as tight as the one-chip label: both fullness percents, nothing pressable; /mem and /disk open the panes.
+      return (
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          <Text color="red" bold>
+            {glyph(m.usedPercent)}
+          </Text>
+          {alarm ? <Text color="red" bold>{`!${used} ${DISK_GLYPH}${diskPct}`}</Text> : <Text>{`${used} ${DISK_GLYPH}${diskPct}`}</Text>}
+          {engine}
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="row" alignItems="center" gap={1}>
         <Text color="red" bold>

@@ -1189,6 +1189,19 @@ describe('round three', () => {
 })
 
 describe('one footer chip (footerCompact)', () => {
+  test('with footerButtons off as well, the compact figures are plain text: the ring glyph, then the two percents', { options: { footerCompact: true, footerButtons: false } }, async ($, on) => {
+    const seen = world(on)
+    await start($, seen)
+    const mode = await $.ui.mount({ plugin: 'mem-gauge', surface: 'desktop', ...MODE })
+    expect(await mode.findAll({ type: 'Button' })).toHaveLength(0)
+    expect(await mode.find({ type: 'Text', text: '◔' })).toBeDefined()
+    expect(await mode.find({ type: 'Text', text: '38% \u26C150%' })).toBeDefined()
+    expect(await mode.find({ type: 'Text', text: /927 GB/ })).toBeUndefined()
+    expect(JSON.stringify(await mode.drawn())).toContain('"type":"engine"')
+    await mode.unmount()
+    expect(seen.opened).toEqual([])
+  })
+
   test('both figures in one chip that opens the Memory pane; the pane has a Disk button', { options: { footerCompact: true } }, async ($, on) => {
     const seen = world(on)
     await start($, seen)

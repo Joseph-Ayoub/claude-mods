@@ -73,7 +73,7 @@ Set in the config menu, or in settings under `pluginConfigs` → `mem-gauge`:
 | `idleMinutes` | 30 | Minutes without a turn before a session counts as idle for the wrap advice. |
 | `statusLine` | false | Also show the one-line summary as a status line (the gauge row already carries it). |
 | `footerButtons` | true | Draw the desktop footer figures as buttons (grey chips) that open the panes; off, they are plain text and `/mem`, `/disk` open the panes. |
-| `footerCompact` | false | One tight chip for both figures as fullness percents (`◔60% ⛁59%`) that opens the Memory pane, where **Disk** (`d`) opens the Disk pane. For footers that other mods' chips share: the desktop strip clips once the chips overflow it. |
+| `footerCompact` | false | Both figures as fullness percents in one tight chip (`◔60% ⛁59%`) that opens the Memory pane, where **Disk** (`d`) opens the Disk pane; with `footerButtons` off, the same figures as plain text, which takes the least room. For footers that other mods' chips share: the desktop strip clips once the chips overflow it. |
 
 ## How it works
 
