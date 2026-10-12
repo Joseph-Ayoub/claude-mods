@@ -1128,3 +1128,23 @@ describe('round three', () => {
     expect(ran.text).not.toContain('/work/')
   })
 })
+
+describe('one footer chip (footerCompact)', () => {
+  test('both figures in one chip that opens the Memory pane; the pane has a Disk button', { options: { footerCompact: true } }, async ($, on) => {
+    const seen = world(on)
+    await start($, seen)
+    const mode = await $.ui.mount({ plugin: 'mem-gauge', surface: 'desktop', ...MODE })
+    const buttons = await mode.findAll({ type: 'Button' })
+    expect(buttons.map(button => [button.key, button.props['label']])).toEqual([['mem-gauge', '◔ 38% · \u26C1 927 GB']])
+    expect(JSON.stringify(await mode.drawn())).toContain('"type":"engine"')
+    await mode.press({ key: 'mem-gauge' })
+    await mode.unmount()
+    expect(seen.opened).toEqual(['mem-gauge'])
+    const pane = await $.ui.mount({ plugin: 'mem-gauge', surface: 'desktop', ...PANE })
+    const disk = await pane.find({ key: 'disk' })
+    expect([disk?.props['label'], disk?.props['hotkey']]).toEqual(['Disk', 'd'])
+    await pane.press({ key: 'disk' })
+    await pane.unmount()
+    expect(seen.opened).toEqual(['mem-gauge', 'mem-gauge-disk'])
+  })
+})

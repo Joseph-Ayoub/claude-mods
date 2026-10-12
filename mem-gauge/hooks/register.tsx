@@ -132,7 +132,7 @@ type TickResult = { snapshot: Snapshot; wrap: WrapRequest | null; newRequest: Wr
 // Per-load plumbing, not state: register() sets the options, and a hot reload
 // starts these over together with the timers it cancels; session.start (or the
 // next turn) arms again.
-let config = { intervalMs: 30_000, advice: { idleMinutes: 30 } as AdviceOptions, showStatus: true, footerButtons: true }
+let config = { intervalMs: 30_000, advice: { idleMinutes: 30 } as AdviceOptions, showStatus: true, footerButtons: true, footerCompact: false }
 let timer: { cancel: () => void } | null = null
 let running: Promise<TickResult | null> | null = null
 let diskScan: Promise<void> | null = null
@@ -757,6 +757,8 @@ export const register: Register = (on, options) => {
     advice: { idleMinutes: clamp(options['idleMinutes'], 30, 1, 24 * 60) },
     showStatus: options['statusLine'] === true,
     footerButtons: options['footerButtons'] !== false,
+    // One chip for both figures: the desktop's footer strip clips past two or three chips (option footerCompact).
+    footerCompact: options['footerCompact'] === true,
   }
   timer = null
   running = null
@@ -948,6 +950,15 @@ export const register: Register = (on, options) => {
     const { used, disk, alarm } = footerParts(snapshot, wrap)
     const openMemory = () => void openPane($).catch(() => undefined)
     const openDisk = () => void openDiskPane($).catch(() => undefined)
+    if (config.footerButtons && config.footerCompact) {
+      // Both figures in one chip, so the strip holds other mods' chips too; Disk is a button in the Memory pane.
+      return (
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          <Button key="mem-gauge" plain label={`${glyph(m.usedPercent)} ${alarm ? '! ' : ''}${used} · ${DISK_GLYPH} ${disk}`} onPress={openMemory} />
+          {engine}
+        </Box>
+      )
+    }
     if (config.footerButtons) {
       return (
         <Box flexDirection="row" alignItems="center" gap={1}>
@@ -982,6 +993,7 @@ export const register: Register = (on, options) => {
     const controls = (
       <Box flexDirection="row" gap={2} marginTop={1}>
         <Button key="refresh" label="Refresh" hotkey="r" onPress={() => void runTick($)} />
+        <Button key="disk" label="Disk" hotkey="d" onPress={() => void openDiskPane($).catch(() => undefined)} />
         <Button key="close" label="Close" hotkey="c" role="dismiss" onPress={() => void $.ui.close({ id: PANE }).catch(() => undefined)} />
       </Box>
     )

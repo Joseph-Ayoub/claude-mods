@@ -1,6 +1,6 @@
 {
   "name": "mem-gauge",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A pressable memory gauge under the composer and a /mem pane: what is using this Mac's RAM across Claude sessions, agents, models and apps, with rule-based advice.",
   "author": {
     "name": "Joseph Ayoub"
@@ -30,6 +30,12 @@
       "title": "Clickable footer figures",
       "description": "Draw the two footer figures as buttons that open the Memory and Disk panes (the desktop draws every button as a grey chip). Off, the figures are plain text and /mem and /disk open the panes.",
       "default": true
+    },
+    "footerCompact": {
+      "type": "boolean",
+      "title": "One footer chip",
+      "description": "Draw memory and disk as ONE footer chip (for example '◔ 60% · ⛁ 927 GB') that opens the Memory pane, where a Disk button opens the Disk pane. Use it when other mods also put chips in the footer: the desktop strip clips once the chips overflow it.",
+      "default": false
     }
   }
 }
